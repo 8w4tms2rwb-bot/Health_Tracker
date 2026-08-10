@@ -1,0 +1,485 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <meta name="apple-mobile-web-app-capable" content="yes">
+  <meta name="apple-mobile-web-app-status-bar-style" content="black">
+  <meta name="apple-mobile-web-app-title" content="Health Log">
+  <meta name="theme-color" content="#4A3563">
+  <title>Health Log</title>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+    html, body { height: 100%; }
+    body { background: #F4F2F7; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif; -webkit-text-size-adjust: 100%; }
+    #root { min-height: 100%; }
+    input, textarea, select, button { font-family: inherit; }
+    button { touch-action: manipulation; }
+  </style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel" data-presets="react">
+    const { useState, useEffect } = React;
+
+    const LS = {
+      get: (key) => { try { return localStorage.getItem(key); } catch { return null; } },
+      set: (key, val) => { try { localStorage.setItem(key, val); } catch {} },
+    };
+
+    const ENTRIES_KEY     = "hl:entries";
+    const TAGS_KEY        = "hl:tags";
+    const FLARE_KEY       = "hl:flare";
+    const PAIN_SCALES_KEY = "hl:painScales";
+
+    const DEFAULT_PAIN_SCALES = [
+      { name: "Gut pain",  enabled: true },
+      { name: "Head pain", enabled: true },
+    ];
+
+    const DEFAULT_TAGS = {
+      "Conditions": [
+        { type:"condition", name:"Migraine", scale:5,
+          phases:["Prodrome","Active","Postdrome"],
+          quickSymptoms:["fatigue","nausea","vomiting","vision changes","light sensitivity",
+            "frequent urination","neck pain","yawning","deja vu",
+            "brain fog","difficulty with words","oversensitization"] },
+        { type:"condition", name:"Ulcerative Colitis", scale:5,
+          phases:[],
+          quickSymptoms:["fatigue","urgency","discomfort after eating","nausea"] },
+        { type:"condition", name:"Period", scale:5,
+          phases:["Pre-menstrual","Menstrual","Post-menstrual"],
+          quickSymptoms:["fatigue","nausea","cramping","bloating","headache","low energy",
+            "brain fog","low self-esteem","high self-esteem","irritability","mood swings",
+            "tender breasts","back pain","insomnia","food cravings"] },
+        { type:"condition", name:"Cold or Flu", scale:5,
+          phases:["Early","Peak","Recovery"],
+          quickSymptoms:["fatigue","headache","nausea","low energy","difficulty with words",
+            "fever","chills","runny nose","sneezing","sore throat","congestion",
+            "cough","body aches","loss of appetite","dizziness"] },
+      ],
+      "Symptoms": [
+        "fatigue","nausea","vomiting","bloating","cramping","urgency",
+        "diarrhea","discomfort after eating","light sensitivity","vision changes",
+        "neck pain","brain fog","frequent urination","headache",
+        "difficulty with words","yawning","oversensitization","deja vu"
+      ],
+      "Food triggers": ["allium exposure","hazelnut","coconut","watermelon","high insoluble fiber","high sugar","naturally more hungry","naturally less hungry"],
+      "Mood & Energy": ["stress","good day","hard day","low energy","good energy","knitting","workout done","poor sleep","good sleep"],
+      "Body":          ["back pain","strong"],
+    };
+
+    const PAIN_COLORS  = ["#6B9E71","#7DAE74","#92BB78","#ADCA7C","#C8C97E","#D4B46A","#D49856","#CA7A48","#C0603A","#B5452E"];
+    const SCALE_COLORS = ["#7AAF8E","#9AAF7A","#C8C97E","#D49856","#B5452E"];
+    const CONSISTENCY  = ["watery","loose","soft/formed"];
+    const BLOOD        = ["none","trace","moderate","significant"];
+    const CAT_COLORS   = {
+      "Conditions":    {bg:"#E8EDF5",text:"#2D4A7A",border:"#B0C0DC"},
+      "Symptoms":      {bg:"#EDE8F5",text:"#4A3563",border:"#C4B8E0"},
+      "Food triggers": {bg:"#E8F5EE",text:"#2A5E3C",border:"#A8D4B8"},
+      "Mood & Energy": {bg:"#FDF0E8",text:"#7A3B2A",border:"#E0C0A8"},
+      "Body":          {bg:"#F0EDF5",text:"#5A3A6B",border:"#C8B8DC"},
+    };
+
+    const todayStr   = () => new Date().toLocaleDateString("en-CA");
+    const fmtDate    = (d) => new Date(d+"T12:00:00").toLocaleDateString("en-GB",{weekday:"short",day:"numeric",month:"short"});
+    const emptyFlare = () => ({stoolCount:0,consistency:"",blood:"none",nocturnal:false});
+    const newMeal    = () => ({id:Date.now().toString(),description:"",kcal:""});
+    const totalKcal  = (meals) => { const s=(meals||[]).reduce((a,m)=>a+(parseInt(m.kcal)||0),0); return s>0?s:null; };
+
+    function OptBtn({value, current, onSelect, color}) {
+      return (
+        <button onClick={() => onSelect(value)} style={{
+          padding:"7px 14px", borderRadius:20,
+          border:`1.5px solid ${value===current?(color||"#4A3563"):"#E2DFF0"}`,
+          background:value===current?(color||"#4A3563"):"white",
+          color:value===current?"white":"#8A87A0",
+          fontWeight:value===current?700:400, fontSize:13, cursor:"pointer", transition:"all 0.1s"
+        }}>{value}</button>
+      );
+    }
+
+    function HealthTracker() {
+      const [tab,           setTab]           = useState("log");
+      const [entries,       setEntries]       = useState([]);
+      const [tags,          setTags]          = useState(DEFAULT_TAGS);
+      const [painScalesDef, setPainScalesDef] = useState(DEFAULT_PAIN_SCALES);
+      const [loaded,        setLoaded]        = useState(false);
+      const [isFlareMode,   setIsFlareMode]   = useState(false);
+
+      const [painScores,  setPainScores]  = useState({});
+      const [symptoms,    setSymptoms]    = useState([]);
+      const [conditions,  setConditions]  = useState({});
+      const [openCond,    setOpenCond]    = useState({});
+      const [otherTags,   setOtherTags]   = useState([]);
+      const [meals,       setMeals]       = useState([]);
+      const [notes,       setNotes]       = useState("");
+      const [flareData,   setFlareData]   = useState(emptyFlare());
+      const [savedFlash,  setSavedFlash]  = useState(false);
+      const [todayLogged, setTodayLogged] = useState(false);
+
+      const [newTagName,    setNewTagName]    = useState("");
+      const [newTagCat,     setNewTagCat]     = useState("Symptoms");
+      const [newCondName,   setNewCondName]   = useState("");
+      const [newCondScale,  setNewCondScale]  = useState(5);
+      const [openCondEdit,  setOpenCondEdit]  = useState({});
+      const [condSymInputs, setCondSymInputs] = useState({});
+      const [newScaleName,  setNewScaleName]  = useState("");
+
+      useEffect(() => {
+        const e=LS.get(ENTRIES_KEY);     if(e) try{setEntries(JSON.parse(e));}catch{}
+        const t=LS.get(TAGS_KEY);        if(t) try{setTags(JSON.parse(t));}catch{}
+        const f=LS.get(FLARE_KEY);       if(f) try{setIsFlareMode(JSON.parse(f));}catch{}
+        const p=LS.get(PAIN_SCALES_KEY); if(p) try{setPainScalesDef(JSON.parse(p));}catch{}
+        setLoaded(true);
+      }, []);
+
+      useEffect(() => {
+        const ex=entries.find(e=>e.date===todayStr());
+        if(ex){
+          setTodayLogged(true);
+          setPainScores(ex.painScores??(ex.gutPain!=null?{"Gut pain":ex.gutPain}:{}));
+          setSymptoms(ex.symptoms??[]);
+          setConditions(ex.conditions??{});
+          setOtherTags(ex.tags??[]);
+          setMeals(ex.meals??[]);
+          setNotes(ex.notes??"");
+          setFlareData(ex.flareData??emptyFlare());
+        }
+      }, [entries]);
+
+      const saveTags       = (next) => { setTags(next); LS.set(TAGS_KEY, JSON.stringify(next)); };
+      const savePainScales = (next) => { setPainScalesDef(next); LS.set(PAIN_SCALES_KEY, JSON.stringify(next)); };
+      const toggleFlare    = () => { const n=!isFlareMode; setIsFlareMode(n); LS.set(FLARE_KEY,JSON.stringify(n)); };
+
+      const saveEntry = () => {
+        const entry={date:todayStr(),painScores,symptoms,conditions,tags:otherTags,meals,notes,
+          flareMode:isFlareMode,flareData:isFlareMode?flareData:null,savedAt:new Date().toISOString()};
+        const updated=[...entries.filter(e=>e.date!==todayStr()),entry].sort((a,b)=>b.date.localeCompare(a.date));
+        setEntries(updated); setTodayLogged(true);
+        LS.set(ENTRIES_KEY,JSON.stringify(updated));
+        setSavedFlash(true); setTimeout(()=>setSavedFlash(false),2000);
+      };
+
+      const setPainScore   = (name,val) => setPainScores(p=>({...p,[name]:val}));
+      const clearPainScore = (name)     => setPainScores(p=>{const n={...p};delete n[name];return n;});
+      const addPainScale   = () => {
+        const name=newScaleName.trim();
+        if(!name||painScalesDef.some(s=>s.name===name)) return;
+        savePainScales([...painScalesDef,{name,enabled:true}]); setNewScaleName("");
+      };
+      const removePainScale = (name) => savePainScales(painScalesDef.filter(s=>s.name!==name));
+      const togglePainScale = (name) => savePainScales(painScalesDef.map(s=>s.name===name?{...s,enabled:!s.enabled}:s));
+
+      const toggleSymptom   = (s) => setSymptoms(p=>p.includes(s)?p.filter(x=>x!==s):[...p,s]);
+      const toggleOtherTag  = (t) => setOtherTags(p=>p.includes(t)?p.filter(x=>x!==t):[...p,t]);
+      const toggleCondPanel = (n) => setOpenCond(p=>({...p,[n]:!p[n]}));
+      const setCondSeverity = (n,sev) => setConditions(p=>({...p,[n]:{...(p[n]||{}),severity:sev}}));
+      const toggleCondPhase = (n,ph)  => { const cur=conditions[n]||{}; setConditions(p=>({...p,[n]:{...cur,phase:cur.phase===ph?undefined:ph}})); };
+      const clearCond       = (n)     => { setConditions(p=>{const x={...p};delete x[n];return x;}); setOpenCond(p=>({...p,[n]:false})); };
+      const setFD = (k,v) => setFlareData(p=>({...p,[k]:v}));
+
+      const addMeal    = ()       => setMeals(p=>[...p,newMeal()]);
+      const removeMeal = (id)     => setMeals(p=>p.filter(m=>m.id!==id));
+      const updateMeal = (id,k,v) => setMeals(p=>p.map(m=>m.id===id?{...m,[k]:v}:m));
+
+      const addTag = () => { const n=newTagName.trim(); if(!n) return; saveTags({...tags,[newTagCat]:[...(tags[newTagCat]??[]),n]}); setNewTagName(""); };
+      const delTag = (cat,tagName) => { saveTags({...tags,[cat]:(tags[cat]??[]).filter(t=>(typeof t==="string"?t:t.name)!==tagName)}); setSymptoms(p=>p.filter(s=>s!==tagName)); setOtherTags(p=>p.filter(t=>t!==tagName)); };
+
+      const addCondition      = () => { const n=newCondName.trim(); if(!n||(tags.Conditions??[]).some(c=>c.name===n)) return; saveTags({...tags,Conditions:[...(tags.Conditions??[]),{type:"condition",name:n,scale:newCondScale,phases:[],quickSymptoms:[]}]}); setNewCondName(""); };
+      const deleteCondition   = (name) => { saveTags({...tags,Conditions:(tags.Conditions??[]).filter(c=>c.name!==name)}); setConditions(p=>{const x={...p};delete x[name];return x;}); };
+      const toggleCondEdit    = (n) => setOpenCondEdit(p=>({...p,[n]:!p[n]}));
+      const addQuickSymptom   = (cn,sym) => { const s=(sym||"").trim(); if(!s) return; const next=(tags.Conditions??[]).map(c=>c.name===cn&&!(c.quickSymptoms??[]).includes(s)?{...c,quickSymptoms:[...(c.quickSymptoms??[]),s]}:c); saveTags({...tags,Conditions:next}); setCondSymInputs(p=>({...p,[cn]:""})); };
+      const removeQuickSymptom= (cn,sym) => { const next=(tags.Conditions??[]).map(c=>c.name===cn?{...c,quickSymptoms:(c.quickSymptoms??[]).filter(s=>s!==sym)}:c); saveTags({...tags,Conditions:next}); };
+
+      const exportCSV = () => {
+        const cd=(tags.Conditions??[]).filter(d=>d.type==="condition");
+        const sh=painScalesDef.map(s=>s.name), ch=cd.flatMap(c=>[`${c.name} Severity`,`${c.name} Phase`]);
+        const rows=[["Date",...sh,"Symptoms",...ch,"Food Notes","Meals","Est. kcal","Notes","Flare Mode","Stools","Consistency","Blood","Nocturnal"],
+          ...entries.map(e=>{
+            const sc=painScalesDef.map(s=>(e.painScores??{})[s.name]??"");
+            const cc=cd.flatMap(c=>[(e.conditions??{})[c.name]?.severity??"",(e.conditions??{})[c.name]?.phase??""]);
+            const ms=(e.meals??[]).map(m=>`${m.description}${m.kcal?" (~"+m.kcal+" kcal)":""}`).join(" | ");
+            const k=totalKcal(e.meals??[]);
+            return [e.date,...sc,`"${(e.symptoms??[]).join(", ")}"`, ...cc,`"${(e.tags??[]).join(", ")}"`,`"${ms.replace(/"/g,'""')}"`,k??"",`"${(e.notes??"").replace(/"/g,'""')}"`,e.flareMode?"yes":"no",e.flareData?.stoolCount??"",e.flareData?.consistency??"",e.flareData?.blood??"",e.flareData?.nocturnal?"yes":""];
+          })];
+        const a=document.createElement("a");
+        a.href=URL.createObjectURL(new Blob([rows.map(r=>r.join(",")).join("\n")],{type:"text/csv"}));
+        a.download=`health-log-${todayStr()}.csv`; a.click();
+      };
+
+      const card={background:"white",borderRadius:12,padding:20,marginBottom:14,boxShadow:"0 1px 4px rgba(0,0,0,0.07)"};
+      const lbl ={fontSize:12,fontWeight:700,textTransform:"uppercase",letterSpacing:"0.08em",color:"#8A87A0",marginBottom:12};
+      const row ={display:"flex",flexWrap:"wrap",gap:8};
+      const inp ={flex:1,padding:"10px 12px",border:"1.5px solid #E2DFF0",borderRadius:8,fontSize:14,fontFamily:"inherit",color:"#1F1F2E",outline:"none"};
+
+      const renderCat=(cat)=>{
+        const col=CAT_COLORS[cat]||CAT_COLORS["Body"], defs=tags[cat]??[];
+        if(cat==="Conditions") return (
+          <div key={cat} style={card}>
+            <div style={lbl}>Conditions</div>
+            <div style={row}>
+              {defs.map(def=>{
+                if(def.type!=="condition") return null;
+                const {name,scale,phases,quickSymptoms}=def, cond=conditions[name], active=cond?.severity!=null, isOpen=openCond[name], mc=CAT_COLORS["Conditions"];
+                return (
+                  <div key={name} style={{width:"100%"}}>
+                    <div style={{display:"flex",alignItems:"center",gap:8,marginBottom:isOpen?12:0}}>
+                      <button onClick={()=>toggleCondPanel(name)} style={{padding:"6px 13px",borderRadius:20,border:`1.5px solid ${active?mc.border:"#E2DFF0"}`,background:active?mc.bg:"white",color:active?mc.text:"#8A87A0",fontWeight:active?700:400,fontSize:13,cursor:"pointer",display:"flex",alignItems:"center",gap:6,transition:"all 0.1s"}}>
+                        {name}{active&&cond.severity&&<span style={{fontSize:11,opacity:0.75}}>{cond.severity}/{scale}</span>}{active&&cond.phase&&<span style={{fontSize:11,opacity:0.75}}>· {cond.phase}</span>}<span style={{fontSize:9,opacity:0.45}}>{isOpen?"▲":"▼"}</span>
+                      </button>
+                      {active&&<button onClick={()=>clearCond(name)} style={{background:"none",border:"none",color:"#C0BDCC",cursor:"pointer",fontSize:18,padding:"0 2px",lineHeight:1}}>×</button>}
+                    </div>
+                    {isOpen&&(
+                      <div style={{background:"#F4F6FA",borderRadius:10,padding:"16px",marginTop:4,marginBottom:4}}>
+                        <div style={{marginBottom:16}}>
+                          <div style={{fontSize:12,fontWeight:700,color:"#5A70A0",marginBottom:10,textTransform:"uppercase",letterSpacing:"0.06em"}}>Severity</div>
+                          <div style={{display:"flex",gap:8}}>
+                            {Array.from({length:scale},(_,i)=>i+1).map(n=>{const on=cond?.severity===n,sc=scale===5?SCALE_COLORS[n-1]:PAIN_COLORS[n-1]; return <button key={n} onClick={()=>setCondSeverity(name,n)} style={{width:42,height:42,borderRadius:8,border:`2px solid ${on?sc:"#DDE2F0"}`,background:on?sc:"white",color:on?"white":"#1F1F2E",fontWeight:700,fontSize:16,cursor:"pointer",transition:"all 0.1s"}}>{n}</button>;})}
+                          </div>
+                        </div>
+                        {phases?.length>0&&<div style={{marginBottom:16}}><div style={{fontSize:12,fontWeight:700,color:"#5A70A0",marginBottom:10,textTransform:"uppercase",letterSpacing:"0.06em"}}>Phase</div><div style={row}>{phases.map(ph=>{const on=cond?.phase===ph; return <button key={ph} onClick={()=>toggleCondPhase(name,ph)} style={{padding:"6px 13px",borderRadius:20,border:`1.5px solid ${on?"#B0C0DC":"#DDE2F0"}`,background:on?"#E8EDF5":"white",color:on?"#2D4A7A":"#7A86A0",fontWeight:on?700:400,fontSize:13,cursor:"pointer",transition:"all 0.1s"}}>{ph}</button>;})}</div></div>}
+                        {quickSymptoms?.length>0&&<div><div style={{fontSize:12,fontWeight:700,color:"#5A70A0",marginBottom:4,textTransform:"uppercase",letterSpacing:"0.06em"}}>Quick-add symptoms</div><div style={{fontSize:11,color:"#8A87A0",marginBottom:10}}>Adds to Symptoms — not labeled as {name.toLowerCase()}-caused</div><div style={row}>{quickSymptoms.map(qs=>{const on=symptoms.includes(qs); return <button key={qs} onClick={()=>toggleSymptom(qs)} style={{padding:"5px 11px",borderRadius:16,border:`1.5px solid ${on?"#C4B8E0":"#DDE2F0"}`,background:on?"#EDE8F5":"white",color:on?"#4A3563":"#7A86A0",fontWeight:on?700:400,fontSize:12,cursor:"pointer",transition:"all 0.1s"}}>{qs}</button>;})}</div></div>}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        );
+        if(cat==="Symptoms") return (
+          <div key={cat} style={card}>
+            <div style={lbl}>Symptoms</div>
+            <div style={{fontSize:11,color:"#8A87A0",marginBottom:10}}>Logged without assuming cause — patterns reveal themselves over time</div>
+            <div style={row}>{defs.map(s=>typeof s==="string"&&<button key={s} onClick={()=>toggleSymptom(s)} style={{padding:"6px 13px",borderRadius:20,border:`1.5px solid ${symptoms.includes(s)?col.border:"#E2DFF0"}`,background:symptoms.includes(s)?col.bg:"white",color:symptoms.includes(s)?col.text:"#8A87A0",fontWeight:symptoms.includes(s)?700:400,fontSize:13,cursor:"pointer",transition:"all 0.1s"}}>{s}</button>)}</div>
+          </div>
+        );
+        if(cat==="Food triggers") return null;
+        return (
+          <div key={cat} style={card}>
+            <div style={lbl}>{cat}</div>
+            <div style={row}>{defs.length===0?<span style={{fontSize:13,color:"#C0BDCC",fontStyle:"italic"}}>No tags — add in Tags tab</span>:defs.map(def=>typeof def==="string"&&<button key={def} onClick={()=>toggleOtherTag(def)} style={{padding:"6px 13px",borderRadius:20,border:`1.5px solid ${otherTags.includes(def)?col.border:"#E2DFF0"}`,background:otherTags.includes(def)?col.bg:"white",color:otherTags.includes(def)?col.text:"#8A87A0",fontWeight:otherTags.includes(def)?700:400,fontSize:13,cursor:"pointer",transition:"all 0.1s"}}>{def}</button>)}</div>
+          </div>
+        );
+      };
+
+      const renderFoodTriggers=()=>{ const defs=tags["Food triggers"]??[],col=CAT_COLORS["Food triggers"]; if(defs.length===0) return null; return <div style={card}><div style={lbl}>Food notes</div><div style={{fontSize:11,color:"#8A87A0",marginBottom:10}}>Notable food events today — trigger foods, patterns</div><div style={row}>{defs.map(def=>typeof def==="string"&&<button key={def} onClick={()=>toggleOtherTag(def)} style={{padding:"6px 13px",borderRadius:20,border:`1.5px solid ${otherTags.includes(def)?col.border:"#E2DFF0"}`,background:otherTags.includes(def)?col.bg:"white",color:otherTags.includes(def)?col.text:"#8A87A0",fontWeight:otherTags.includes(def)?700:400,fontSize:13,cursor:"pointer",transition:"all 0.1s"}}>{def}</button>)}</div></div>; };
+
+      if(!loaded) return <div style={{display:"flex",alignItems:"center",justifyContent:"center",height:"100vh",background:"#F4F2F7",color:"#4A3563"}}>Loading…</div>;
+
+      const allCats=Object.keys(tags), headerBg=isFlareMode?"#7A3020":"#4A3563";
+      const condDefs=(tags.Conditions??[]).filter(d=>d.type==="condition");
+      const allSymptomsList=(tags.Symptoms??[]).filter(s=>typeof s==="string");
+      const enabledScales=painScalesDef.filter(s=>s.enabled);
+
+      return (
+        <div style={{minHeight:"100vh",background:"#F4F2F7",color:"#1F1F2E"}}>
+          <div style={{background:headerBg,padding:"20px 20px 0",color:"white",transition:"background 0.3s"}}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
+              <div>
+                <div style={{fontSize:12,opacity:0.65,letterSpacing:"0.1em",textTransform:"uppercase",marginBottom:4}}>Health Log</div>
+                <div style={{fontSize:20,fontWeight:600,marginBottom:16}}>{new Date().toLocaleDateString("en-GB",{weekday:"long",day:"numeric",month:"long"})}</div>
+              </div>
+              <button onClick={toggleFlare} style={{marginTop:4,padding:"6px 14px",borderRadius:20,border:`1.5px solid ${isFlareMode?"#FF9980":"rgba(255,255,255,0.35)"}`,background:isFlareMode?"rgba(255,100,70,0.25)":"transparent",color:isFlareMode?"#FF9980":"rgba(255,255,255,0.6)",fontSize:11,fontWeight:700,cursor:"pointer",letterSpacing:"0.05em",textTransform:"uppercase"}}>{isFlareMode?"⚠ Flare ON":"Flare mode"}</button>
+            </div>
+            <div style={{display:"flex",gap:2}}>
+              {[["log","Today"],["history","History"],["tags","Tags"],["export","Export"]].map(([id,label])=>(
+                <button key={id} onClick={()=>setTab(id)} style={{padding:"8px 16px",background:tab===id?"white":"transparent",color:tab===id?headerBg:"rgba(255,255,255,0.6)",border:"none",borderRadius:"8px 8px 0 0",cursor:"pointer",fontSize:14,fontWeight:tab===id?700:400,transition:"all 0.15s"}}>{label}</button>
+              ))}
+            </div>
+          </div>
+
+          <div style={{padding:"20px",maxWidth:640,margin:"0 auto"}}>
+
+            {tab==="log"&&<div>
+              {isFlareMode&&<div style={{background:"#FDF0ED",border:"1px solid #E8B4A8",borderRadius:8,padding:"10px 14px",marginBottom:14,fontSize:13,color:"#7A3020",fontWeight:500}}>⚠ Flare mode on</div>}
+              {todayLogged&&<div style={{background:"#E8F5EE",border:"1px solid #A8D4B8",borderRadius:8,padding:"10px 14px",marginBottom:14,fontSize:13,color:"#2A5E3C"}}>✓ Entry saved — saving again updates it</div>}
+
+              {enabledScales.length>0&&<div style={card}>
+                <div style={lbl}>Pain</div>
+                {enabledScales.map((scale,idx)=>{
+                  const val=painScores[scale.name];
+                  return <div key={scale.name} style={{marginBottom:idx<enabledScales.length-1?20:0}}>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:8}}>
+                      <span style={{fontSize:13,fontWeight:600,color:"#5A5870"}}>{scale.name}</span>
+                      {val!=null?<button onClick={()=>clearPainScore(scale.name)} style={{background:"none",border:"none",color:"#C0BDCC",cursor:"pointer",fontSize:12,padding:0}}>clear</button>:<span style={{fontSize:11,color:"#C0BDCC",fontStyle:"italic"}}>not logged</span>}
+                    </div>
+                    <div style={{display:"flex",gap:6,flexWrap:"wrap"}}>
+                      {[1,2,3,4,5,6,7,8,9,10].map(n=><button key={n} onClick={()=>setPainScore(scale.name,n)} style={{width:40,height:40,borderRadius:8,border:`2px solid ${val===n?PAIN_COLORS[n-1]:"#E2DFF0"}`,background:val===n?PAIN_COLORS[n-1]:"white",color:val===n?"white":"#1F1F2E",fontWeight:600,fontSize:14,cursor:"pointer",transition:"all 0.1s"}}>{n}</button>)}
+                    </div>
+                  </div>;
+                })}
+                <div style={{fontSize:12,color:"#8A87A0",marginTop:12}}>1 = barely noticeable · 10 = severe</div>
+              </div>}
+
+              {isFlareMode&&<div style={{...card,border:"1.5px solid #E8B4A8",background:"#FFFAF9"}}>
+                <div style={{...lbl,color:"#A04030"}}>Flare tracking</div>
+                <div style={{marginBottom:18}}><div style={{fontSize:13,fontWeight:600,color:"#5A3A30",marginBottom:8}}>Stools today</div><div style={{display:"flex",alignItems:"center",gap:12}}><button onClick={()=>setFD("stoolCount",Math.max(0,flareData.stoolCount-1))} style={{width:36,height:36,borderRadius:8,border:"1.5px solid #E2DFF0",background:"white",fontSize:20,cursor:"pointer",color:"#7A3020",fontWeight:700}}>−</button><span style={{fontSize:22,fontWeight:700,minWidth:24,textAlign:"center"}}>{flareData.stoolCount}</span><button onClick={()=>setFD("stoolCount",flareData.stoolCount+1)} style={{width:36,height:36,borderRadius:8,border:"1.5px solid #E2DFF0",background:"white",fontSize:20,cursor:"pointer",color:"#7A3020",fontWeight:700}}>+</button></div></div>
+                <div style={{marginBottom:18}}><div style={{fontSize:13,fontWeight:600,color:"#5A3A30",marginBottom:8}}>Consistency</div><div style={row}>{CONSISTENCY.map(o=><OptBtn key={o} value={o} current={flareData.consistency} onSelect={v=>setFD("consistency",v)} color="#9A4535"/>)}</div></div>
+                <div style={{marginBottom:18}}><div style={{fontSize:13,fontWeight:600,color:"#5A3A30",marginBottom:8}}>Blood</div><div style={row}>{BLOOD.map(o=><OptBtn key={o} value={o} current={flareData.blood} onSelect={v=>setFD("blood",v)} color={o==="none"?"#6B9E71":o==="trace"?"#C8A056":o==="moderate"?"#C06040":"#9A2020"}/>)}</div></div>
+                <div><div style={{fontSize:13,fontWeight:600,color:"#5A3A30",marginBottom:8}}>Woken at night</div><div style={row}>{["yes","no"].map(o=><OptBtn key={o} value={o} current={flareData.nocturnal?"yes":"no"} onSelect={v=>setFD("nocturnal",v==="yes")} color={o==="yes"?"#9A4535":"#6B9E71"}/>)}</div></div>
+              </div>}
+
+              {allCats.map(cat=>renderCat(cat))}
+              {renderFoodTriggers()}
+
+              <div style={card}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
+                  <div style={lbl}>Meals</div>
+                  {totalKcal(meals)&&<div style={{fontSize:12,color:"#8A87A0",fontWeight:600}}>~{totalKcal(meals).toLocaleString()} kcal total</div>}
+                </div>
+                {meals.length===0&&<div style={{fontSize:13,color:"#B0ADBD",fontStyle:"italic",marginBottom:12}}>No meals logged yet</div>}
+                {meals.map((meal)=>(
+                  <div key={meal.id} style={{background:"#F8F7FC",borderRadius:10,padding:"12px 14px",marginBottom:10,border:"1.5px solid #EDE9F5"}}>
+                    <div style={{display:"flex",justifyContent:"flex-end",marginBottom:6}}><button onClick={()=>removeMeal(meal.id)} style={{background:"none",border:"none",color:"#C0BDCC",cursor:"pointer",fontSize:18,padding:"0 2px",lineHeight:1}}>×</button></div>
+                    <textarea value={meal.description} onChange={e=>updateMeal(meal.id,"description",e.target.value)} placeholder="What did you eat?" rows={2}
+                      style={{width:"100%",boxSizing:"border-box",border:"1.5px solid #E2DFF0",borderRadius:8,padding:"8px 10px",fontSize:13,fontFamily:"inherit",resize:"vertical",color:"#1F1F2E",outline:"none",lineHeight:1.5,background:"white"}}/>
+                    <div style={{display:"flex",alignItems:"center",gap:6,marginTop:8}}>
+                      <span style={{fontSize:12,color:"#B0ADBD"}}>~</span>
+                      <input type="number" value={meal.kcal} onChange={e=>updateMeal(meal.id,"kcal",e.target.value)} placeholder="kcal estimate" min={0}
+                        style={{width:110,padding:"5px 8px",border:"1.5px solid #E2DFF0",borderRadius:8,fontSize:12,fontFamily:"inherit",color:"#1F1F2E",outline:"none"}}/>
+                      <span style={{fontSize:12,color:"#B0ADBD"}}>kcal (optional)</span>
+                    </div>
+                  </div>
+                ))}
+                <button onClick={addMeal} style={{width:"100%",padding:"10px",background:"white",color:"#4A3563",border:"1.5px dashed #C4B8E0",borderRadius:10,fontSize:13,fontWeight:600,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",gap:6}}>
+                  <span style={{fontSize:16,lineHeight:1}}>+</span> Add a meal
+                </button>
+              </div>
+
+              <div style={card}>
+                <div style={lbl}>Notes</div>
+                <textarea style={{width:"100%",boxSizing:"border-box",border:"1.5px solid #E2DFF0",borderRadius:8,padding:"10px 12px",fontSize:14,fontFamily:"inherit",resize:"vertical",color:"#1F1F2E",outline:"none",lineHeight:1.5}} rows={3} value={notes} onChange={e=>setNotes(e.target.value)} placeholder="Anything else worth noting…"/>
+              </div>
+
+              <button onClick={saveEntry} style={{width:"100%",padding:14,border:"none",borderRadius:12,fontSize:15,fontWeight:600,cursor:"pointer",background:savedFlash?"#7AAF8E":headerBg,color:"white",transition:"background 0.2s"}}>
+                {savedFlash?"✓ Saved":todayLogged?"Update today's entry":"Save today's entry"}
+              </button>
+            </div>}
+
+            {tab==="history"&&<div>
+              {entries.length===0
+                ?<div style={{textAlign:"center",padding:"60px 0",color:"#8A87A0"}}><div style={{fontSize:36,marginBottom:12}}>📋</div><div style={{fontSize:16,fontWeight:600}}>No entries yet</div><div style={{fontSize:14,marginTop:6}}>Start in Today</div></div>
+                :entries.map(e=>{
+                  const ac=Object.entries(e.conditions||{}).filter(([,v])=>v?.severity!=null);
+                  const sc=e.painScores??(e.gutPain!=null?{"Gut pain":e.gutPain}:{});
+                  const as2=Object.entries(sc).filter(([,v])=>v!=null);
+                  const kc=totalKcal(e.meals??[]);
+                  return <div key={e.date} style={{...card,borderLeft:e.flareMode?"3px solid #C06040":"3px solid transparent"}}>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start",marginBottom:10}}>
+                      <div style={{display:"flex",flexWrap:"wrap",gap:6,alignItems:"center",flex:1,marginRight:8}}>
+                        <span style={{fontWeight:600,fontSize:15}}>{fmtDate(e.date)}</span>
+                        {e.flareMode&&<span style={{fontSize:11,background:"#FDF0ED",color:"#9A4535",borderRadius:10,padding:"2px 8px",fontWeight:700}}>FLARE</span>}
+                        {ac.map(([name,val])=><span key={name} style={{fontSize:11,background:"#E8EDF5",color:"#2D4A7A",borderRadius:10,padding:"2px 8px",fontWeight:700}}>{name} {val.severity}/{(tags.Conditions??[]).find(c=>c.name===name)?.scale||5}{val.phase?` · ${val.phase}`:""}</span>)}
+                      </div>
+                      <div style={{display:"flex",flexDirection:"column",gap:4,alignItems:"flex-end",flexShrink:0}}>
+                        {as2.map(([name,val])=><div key={name} style={{display:"flex",alignItems:"center",gap:5}}><span style={{fontSize:10,color:"#8A87A0"}}>{name}</span><div style={{background:PAIN_COLORS[val-1],color:"white",borderRadius:14,padding:"2px 8px",fontSize:12,fontWeight:700}}>{val}</div></div>)}
+                        {as2.length===0&&<span style={{fontSize:11,color:"#C0BDCC"}}>pain not logged</span>}
+                      </div>
+                    </div>
+                    {e.flareMode&&e.flareData&&<div style={{background:"#FDF0ED",borderRadius:8,padding:"8px 12px",marginBottom:8,fontSize:13,color:"#7A3020",display:"flex",gap:12,flexWrap:"wrap"}}>{e.flareData.stoolCount>0&&<span>💩 {e.flareData.stoolCount}</span>}{e.flareData.consistency&&<span>{e.flareData.consistency}</span>}{e.flareData.blood&&e.flareData.blood!=="none"&&<span>blood: {e.flareData.blood}</span>}{e.flareData.nocturnal&&<span>nocturnal</span>}</div>}
+                    {e.symptoms?.length>0&&<div style={{display:"flex",flexWrap:"wrap",gap:5,marginBottom:8}}>{e.symptoms.map(s=><span key={s} style={{background:"#EDE8F5",color:"#4A3563",borderRadius:12,padding:"2px 9px",fontSize:12}}>{s}</span>)}</div>}
+                    {e.meals?.length>0&&<div style={{marginBottom:8}}>{e.meals.map(m=><div key={m.id} style={{fontSize:13,color:"#5A5870",padding:"2px 0",display:"flex",gap:6,alignItems:"baseline"}}><span style={{flex:1}}>{m.description}</span>{m.kcal&&<span style={{fontSize:11,color:"#8A87A0",flexShrink:0}}>~{m.kcal} kcal</span>}</div>)}{kc&&<div style={{fontSize:11,color:"#8A87A0",marginTop:2,fontWeight:600}}>~{kc.toLocaleString()} kcal estimated</div>}</div>}
+                    {e.tags?.length>0&&<div style={{display:"flex",flexWrap:"wrap",gap:5,marginBottom:8}}>{e.tags.map(t=><span key={t} style={{background:"#F0F0F0",color:"#5A5870",borderRadius:12,padding:"2px 9px",fontSize:12}}>{t}</span>)}</div>}
+                    {e.notes&&<div style={{fontSize:13,color:"#5A5870"}}><strong>Notes:</strong> {e.notes}</div>}
+                  </div>;
+                })
+              }
+            </div>}
+
+            {tab==="tags"&&<div>
+              <div style={card}>
+                <div style={lbl}>Pain scales</div>
+                <div style={{fontSize:12,color:"#8A87A0",marginBottom:12}}>Choose which pain scales appear in Today.</div>
+                {painScalesDef.map(scale=><div key={scale.name} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"8px 0",borderBottom:"1px solid #F4F2F7"}}>
+                  <span style={{fontSize:14,color:scale.enabled?"#1F1F2E":"#B0ADBD"}}>{scale.name}</span>
+                  <div style={{display:"flex",gap:8,alignItems:"center"}}>
+                    <button onClick={()=>togglePainScale(scale.name)} style={{padding:"3px 10px",borderRadius:12,border:`1.5px solid ${scale.enabled?"#4A3563":"#E2DFF0"}`,background:scale.enabled?"#4A3563":"white",color:scale.enabled?"white":"#8A87A0",fontSize:11,fontWeight:600,cursor:"pointer"}}>{scale.enabled?"On":"Off"}</button>
+                    <button onClick={()=>removePainScale(scale.name)} style={{background:"none",border:"none",color:"#C0BDCC",cursor:"pointer",fontSize:20,padding:"0 4px",lineHeight:1}}>×</button>
+                  </div>
+                </div>)}
+                <div style={{display:"flex",gap:8,marginTop:14}}>
+                  <input value={newScaleName} onChange={e=>setNewScaleName(e.target.value)} onKeyDown={e=>e.key==="Enter"&&addPainScale()} placeholder="New scale name…" style={{...inp,fontSize:13,padding:"8px 12px"}}/>
+                  <button onClick={addPainScale} style={{padding:"8px 14px",background:headerBg,color:"white",border:"none",borderRadius:8,fontSize:13,fontWeight:600,cursor:"pointer"}}>Add</button>
+                </div>
+              </div>
+
+              <div style={card}>
+                <div style={lbl}>Add a condition</div>
+                <div style={{fontSize:12,color:"#8A87A0",marginBottom:12}}>Conditions appear in Today with a severity scale and quick-add symptoms.</div>
+                <input value={newCondName} onChange={e=>setNewCondName(e.target.value)} onKeyDown={e=>e.key==="Enter"&&addCondition()} placeholder="Condition name…" style={{width:"100%",boxSizing:"border-box",padding:"10px 12px",border:"1.5px solid #E2DFF0",borderRadius:8,fontSize:14,fontFamily:"inherit",color:"#1F1F2E",outline:"none",marginBottom:12}}/>
+                <div style={{marginBottom:14}}><div style={{fontSize:12,fontWeight:600,color:"#8A87A0",marginBottom:8}}>Severity scale</div><div style={{display:"flex",gap:8}}>{[5,10].map(n=><button key={n} onClick={()=>setNewCondScale(n)} style={{padding:"7px 18px",borderRadius:20,border:`1.5px solid ${newCondScale===n?headerBg:"#E2DFF0"}`,background:newCondScale===n?headerBg:"white",color:newCondScale===n?"white":"#8A87A0",fontWeight:newCondScale===n?700:400,fontSize:13,cursor:"pointer"}}>1–{n}</button>)}</div></div>
+                <button onClick={addCondition} style={{width:"100%",padding:"10px",background:headerBg,color:"white",border:"none",borderRadius:8,fontSize:14,fontWeight:600,cursor:"pointer"}}>Add condition</button>
+              </div>
+
+              {condDefs.length>0&&<div style={card}>
+                <div style={lbl}>Conditions</div>
+                {condDefs.map(cond=>{
+                  const isOpen=openCondEdit[cond.name],si=condSymInputs[cond.name]||"",aa=cond.quickSymptoms??[],av=allSymptomsList.filter(s=>!aa.includes(s));
+                  return <div key={cond.name} style={{borderBottom:"1px solid #F4F2F7"}}>
+                    <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"10px 0"}}>
+                      <button onClick={()=>toggleCondEdit(cond.name)} style={{background:"none",border:"none",cursor:"pointer",padding:0,display:"flex",alignItems:"center",gap:8}}>
+                        <span style={{fontSize:14,fontWeight:600,color:"#1F1F2E"}}>{cond.name}</span>
+                        <span style={{fontSize:11,color:"#8A87A0",background:"#F0EDF5",padding:"1px 7px",borderRadius:8}}>1–{cond.scale} · {aa.length} symptoms</span>
+                        <span style={{fontSize:9,color:"#8A87A0"}}>{isOpen?"▲":"▼"}</span>
+                      </button>
+                      <button onClick={()=>deleteCondition(cond.name)} style={{background:"none",border:"1px solid #E2DFF0",color:"#C0BDCC",cursor:"pointer",fontSize:12,padding:"2px 8px",borderRadius:6}}>Delete</button>
+                    </div>
+                    {isOpen&&<div style={{background:"#F4F6FA",borderRadius:10,padding:"16px",marginBottom:12}}>
+                      {aa.length>0&&<div style={{marginBottom:16}}><div style={{fontSize:12,fontWeight:700,color:"#5A70A0",marginBottom:8,textTransform:"uppercase",letterSpacing:"0.06em"}}>Quick symptoms</div><div style={{display:"flex",flexWrap:"wrap",gap:6}}>{aa.map(s=><div key={s} style={{display:"flex",alignItems:"center",gap:3,background:"#EDE8F5",borderRadius:16,padding:"4px 8px 4px 12px"}}><span style={{fontSize:12,color:"#4A3563"}}>{s}</span><button onClick={()=>removeQuickSymptom(cond.name,s)} style={{background:"none",border:"none",color:"#A090C0",cursor:"pointer",fontSize:15,padding:"0 2px",lineHeight:1}}>×</button></div>)}</div></div>}
+                      {av.length>0&&<div style={{marginBottom:16}}><div style={{fontSize:12,fontWeight:700,color:"#5A70A0",marginBottom:8,textTransform:"uppercase",letterSpacing:"0.06em"}}>Add from symptoms list</div><div style={{display:"flex",flexWrap:"wrap",gap:6}}>{av.map(s=><button key={s} onClick={()=>addQuickSymptom(cond.name,s)} style={{padding:"4px 11px",borderRadius:16,border:"1.5px solid #DDE2F0",background:"white",color:"#7A86A0",fontSize:12,cursor:"pointer"}}>+ {s}</button>)}</div></div>}
+                      <div><div style={{fontSize:12,fontWeight:700,color:"#5A70A0",marginBottom:8,textTransform:"uppercase",letterSpacing:"0.06em"}}>Or type a new symptom</div><div style={{display:"flex",gap:8}}><input value={si} onChange={e=>setCondSymInputs(p=>({...p,[cond.name]:e.target.value}))} onKeyDown={e=>e.key==="Enter"&&addQuickSymptom(cond.name,si)} placeholder="Symptom name…" style={{...inp,fontSize:13,padding:"8px 12px"}}/><button onClick={()=>addQuickSymptom(cond.name,si)} style={{padding:"8px 14px",background:headerBg,color:"white",border:"none",borderRadius:8,fontSize:13,fontWeight:600,cursor:"pointer"}}>Add</button></div></div>
+                    </div>}
+                  </div>;
+                })}
+              </div>}
+
+              <div style={card}>
+                <div style={lbl}>Add a tag</div>
+                <select value={newTagCat} onChange={e=>setNewTagCat(e.target.value)} style={{width:"100%",padding:"10px 12px",marginBottom:10,border:"1.5px solid #E2DFF0",borderRadius:8,fontSize:14,fontFamily:"inherit",color:"#1F1F2E",background:"white",outline:"none"}}>
+                  {allCats.filter(c=>c!=="Conditions").map(c=><option key={c} value={c}>{c}</option>)}
+                </select>
+                <div style={{display:"flex",gap:8}}>
+                  <input value={newTagName} onChange={e=>setNewTagName(e.target.value)} onKeyDown={e=>e.key==="Enter"&&addTag()} placeholder="Tag name…" style={inp}/>
+                  <button onClick={addTag} style={{padding:"10px 18px",background:headerBg,color:"white",border:"none",borderRadius:8,fontSize:14,fontWeight:600,cursor:"pointer"}}>Add</button>
+                </div>
+              </div>
+
+              {allCats.filter(c=>c!=="Conditions").map(cat=><div key={cat} style={card}>
+                <div style={lbl}>{cat}</div>
+                {(tags[cat]??[]).length===0?<div style={{fontSize:13,color:"#C0BDCC",fontStyle:"italic"}}>No tags yet</div>:(tags[cat]??[]).map(def=>{const name=typeof def==="string"?def:def.name; return <div key={name} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"8px 0",borderBottom:"1px solid #F4F2F7"}}><span style={{fontSize:14}}>{name}</span><button onClick={()=>delTag(cat,name)} style={{background:"none",border:"none",color:"#C0BDCC",cursor:"pointer",fontSize:20,padding:"0 4px",lineHeight:1}}>×</button></div>;})}
+              </div>)}
+            </div>}
+
+            {tab==="export"&&<div>
+              <div style={card}>
+                <div style={lbl}>Your data</div>
+                <div style={{fontSize:22,fontWeight:700,color:"#4A3563",marginBottom:4}}>{entries.length} entries</div>
+                {entries.length>0&&<div style={{fontSize:13,color:"#8A87A0"}}>{fmtDate(entries[entries.length-1].date)} → {fmtDate(entries[0].date)}</div>}
+              </div>
+              <div style={card}>
+                <div style={lbl}>CSV includes</div>
+                {["Date",...painScalesDef.map(s=>s.name+" (1–10)"),"Symptoms","Condition severities & phases","Food notes","Meals + kcal","Notes","Flare data"].map(item=><div key={item} style={{fontSize:14,color:"#5A5870",padding:"6px 0",borderBottom:"1px solid #F4F2F7",display:"flex",gap:10}}><span style={{color:"#7AAF8E",fontWeight:700}}>✓</span> {item}</div>)}
+              </div>
+              <button onClick={exportCSV} disabled={entries.length===0} style={{width:"100%",padding:14,border:"none",borderRadius:12,fontSize:15,fontWeight:600,background:entries.length===0?"#E2DFF0":headerBg,color:entries.length===0?"#B0ADBD":"white",cursor:entries.length===0?"not-allowed":"pointer"}}>
+                Download CSV
+              </button>
+              <div style={{marginTop:16,padding:16,background:"#FDF0E8",borderRadius:10,border:"1px solid #E0C0A8"}}>
+                <div style={{fontSize:12,fontWeight:700,color:"#7A3B2A",marginBottom:6,textTransform:"uppercase",letterSpacing:"0.06em"}}>⚠ Back up regularly</div>
+                <div style={{fontSize:13,color:"#7A3B2A"}}>Your data lives only on this device. Export a CSV periodically so you don't lose it if you clear your browser data.</div>
+              </div>
+            </div>}
+
+          </div>
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById("root")).render(<HealthTracker/>);
+  </script>
+</body>
+</html>
