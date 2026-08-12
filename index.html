@@ -8,9 +8,9 @@
   <meta name="apple-mobile-web-app-title" content="Health Log">
   <meta name="theme-color" content="#4A3563">
   <title>Health Log</title>
-  <script crossorigin src="https://unpkg.com/react@18.2.0/umd/react.production.min.js"></script>
-  <script crossorigin src="https://unpkg.com/react-dom@18.2.0/umd/react-dom.production.min.js"></script>
-  <script src="https://unpkg.com/@babel/standalone@7.23.5/babel.min.js"></script>
+  <script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script crossorigin src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
     html, body { height: 100%; }
@@ -75,9 +75,9 @@
         "neck pain","brain fog","frequent urination","headache",
         "difficulty with words","yawning","oversensitization","deja vu"
       ],
-      "Food triggers": ["allium exposure","hazelnut","coconut","watermelon","high insoluble fiber","high sugar","naturally more hungry","naturally less hungry"],
-      "Mood & Energy": ["stress","good day","hard day","low energy","good energy","knitting","workout done","poor sleep","good sleep"],
-      "Body":          ["back pain","strong"],
+      "Food triggers": ["allium exposure","hazelnut","coconut","watermelon","high insoluble fiber","high sugar","naturally more hungry","naturally less hungry","red meat"],
+      "Mood & Energy": ["stress","good day","hard day","low energy","good energy","workout done","poor sleep","good sleep"],
+      "Body":          ["back pain","strong","good body image","poor body image","right shoulder pain","sciatica"],
     };
 
     const PAIN_COLORS  = ["#6B9E71","#7DAE74","#92BB78","#ADCA7C","#C8C97E","#D4B46A","#D49856","#CA7A48","#C0603A","#B5452E"];
@@ -91,6 +91,19 @@
       "Mood & Energy": {bg:"#FDF0E8",text:"#7A3B2A",border:"#E0C0A8"},
       "Body":          {bg:"#F0EDF5",text:"#5A3A6B",border:"#C8B8DC"},
     };
+
+    const FIND_CATS = ["Conditions","Symptoms","Food triggers","Mood & Energy","Body"];
+    const entryMatchesTag = (entry, cat, name) => {
+      if(!entry) return false;
+      if(cat==="Conditions") return entry.conditions?.[name]?.severity!=null;
+      if(cat==="Symptoms") return (entry.symptoms||[]).includes(name);
+      return (entry.tags||[]).includes(name);
+    };
+    const pad2         = (n) => String(n).padStart(2,"0");
+    const dateStrFor   = (y,m,day) => `${y}-${pad2(m+1)}-${pad2(day)}`;
+    const daysInMonth  = (y,m) => new Date(y,m+1,0).getDate();
+    const firstWeekdayMon = (y,m) => (new Date(y,m,1).getDay()+6)%7; // 0=Mon..6=Sun
+    const MONTH_NAMES  = ["January","February","March","April","May","June","July","August","September","October","November","December"];
 
     const todayStr   = () => new Date().toLocaleDateString("en-CA");
     const fmtDate    = (d) => new Date(d+"T12:00:00").toLocaleDateString("en-GB",{weekday:"short",day:"numeric",month:"short"});
@@ -127,7 +140,8 @@
       const [notes,       setNotes]       = useState("");
       const [flareData,   setFlareData]   = useState(emptyFlare());
       const [savedFlash,  setSavedFlash]  = useState(false);
-      const [todayLogged, setTodayLogged] = useState(false);
+      const [dateLogged,  setDateLogged]  = useState(false);
+      const [selectedDate, setSelectedDate] = useState(todayStr());
 
       const [newTagName,    setNewTagName]    = useState("");
       const [newTagCat,     setNewTagCat]     = useState("Symptoms");
@@ -136,6 +150,11 @@
       const [openCondEdit,  setOpenCondEdit]  = useState({});
       const [condSymInputs, setCondSymInputs] = useState({});
       const [newScaleName,  setNewScaleName]  = useState("");
+
+      const [findCat,          setFindCat]          = useState("Symptoms");
+      const [findTag,          setFindTag]          = useState(null);
+      const [findMonth,        setFindMonth]        = useState(()=>{const d=new Date();return {y:d.getFullYear(),m:d.getMonth()};});
+      const [findSelectedDate, setFindSelectedDate] = useState(null);
 
       useEffect(() => {
         const e=LS.get(ENTRIES_KEY);     if(e) try{setEntries(JSON.parse(e));}catch{}
@@ -146,9 +165,9 @@
       }, []);
 
       useEffect(() => {
-        const ex=entries.find(e=>e.date===todayStr());
+        const ex=entries.find(e=>e.date===selectedDate);
         if(ex){
-          setTodayLogged(true);
+          setDateLogged(true);
           setPainScores(ex.painScores??(ex.gutPain!=null?{"Gut pain":ex.gutPain}:{}));
           setSymptoms(ex.symptoms??[]);
           setConditions(ex.conditions??{});
@@ -156,21 +175,32 @@
           setMeals(ex.meals??[]);
           setNotes(ex.notes??"");
           setFlareData(ex.flareData??emptyFlare());
+        } else {
+          setDateLogged(false);
+          setPainScores({});
+          setSymptoms([]);
+          setConditions({});
+          setOtherTags([]);
+          setMeals([]);
+          setNotes("");
+          setFlareData(emptyFlare());
         }
-      }, [entries]);
+      }, [entries, selectedDate]);
 
       const saveTags       = (next) => { setTags(next); LS.set(TAGS_KEY, JSON.stringify(next)); };
       const savePainScales = (next) => { setPainScalesDef(next); LS.set(PAIN_SCALES_KEY, JSON.stringify(next)); };
       const toggleFlare    = () => { const n=!isFlareMode; setIsFlareMode(n); LS.set(FLARE_KEY,JSON.stringify(n)); };
 
       const saveEntry = () => {
-        const entry={date:todayStr(),painScores,symptoms,conditions,tags:otherTags,meals,notes,
+        const entry={date:selectedDate,painScores,symptoms,conditions,tags:otherTags,meals,notes,
           flareMode:isFlareMode,flareData:isFlareMode?flareData:null,savedAt:new Date().toISOString()};
-        const updated=[...entries.filter(e=>e.date!==todayStr()),entry].sort((a,b)=>b.date.localeCompare(a.date));
-        setEntries(updated); setTodayLogged(true);
+        const updated=[...entries.filter(e=>e.date!==selectedDate),entry].sort((a,b)=>b.date.localeCompare(a.date));
+        setEntries(updated); setDateLogged(true);
         LS.set(ENTRIES_KEY,JSON.stringify(updated));
         setSavedFlash(true); setTimeout(()=>setSavedFlash(false),2000);
       };
+
+      const goToDate = (dateStr) => { setSelectedDate(dateStr); setTab("log"); };
 
       const setPainScore   = (name,val) => setPainScores(p=>({...p,[name]:val}));
       const clearPainScore = (name)     => setPainScores(p=>{const n={...p};delete n[name];return n;});
@@ -277,6 +307,50 @@
 
       const renderFoodTriggers=()=>{ const defs=tags["Food triggers"]??[],col=CAT_COLORS["Food triggers"]; if(defs.length===0) return null; return <div style={card}><div style={lbl}>Food notes</div><div style={{fontSize:11,color:"#8A87A0",marginBottom:10}}>Notable food events today — trigger foods, patterns</div><div style={row}>{defs.map(def=>typeof def==="string"&&<button key={def} onClick={()=>toggleOtherTag(def)} style={{padding:"6px 13px",borderRadius:20,border:`1.5px solid ${otherTags.includes(def)?col.border:"#E2DFF0"}`,background:otherTags.includes(def)?col.bg:"white",color:otherTags.includes(def)?col.text:"#8A87A0",fontWeight:otherTags.includes(def)?700:400,fontSize:13,cursor:"pointer",transition:"all 0.1s"}}>{def}</button>)}</div></div>; };
 
+      const renderFindCalendar=(findCol,headerBg,actualPeriodSet,isAnticipated,hasPeriodData,cycleLegendText)=>{
+        const {y,m}=findMonth, dim=daysInMonth(y,m), lead=firstWeekdayMon(y,m), todayD=todayStr();
+        const cells=[]; for(let i=0;i<lead;i++) cells.push(null); for(let d=1;d<=dim;d++) cells.push(d);
+        return (
+          <div style={card}>
+            <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:14}}>
+              <button onClick={()=>setFindMonth(p=>{const nm=p.m-1; return nm<0?{y:p.y-1,m:11}:{y:p.y,m:nm};})} style={{background:"none",border:"none",fontSize:20,color:"#8A87A0",cursor:"pointer",padding:"4px 12px"}}>‹</button>
+              <div style={{fontSize:14,fontWeight:700,color:"#1F1F2E"}}>{MONTH_NAMES[m]} {y}</div>
+              <button onClick={()=>setFindMonth(p=>{const nm=p.m+1; return nm>11?{y:p.y+1,m:0}:{y:p.y,m:nm};})} style={{background:"none",border:"none",fontSize:20,color:"#8A87A0",cursor:"pointer",padding:"4px 12px"}}>›</button>
+            </div>
+            <div style={{display:"grid",gridTemplateColumns:"repeat(7,1fr)",gap:2,marginBottom:2}}>
+              {["Mo","Tu","We","Th","Fr","Sa","Su"].map(w=><div key={w} style={{textAlign:"center",fontSize:11,color:"#B0ADBD",fontWeight:600,padding:"4px 0"}}>{w}</div>)}
+            </div>
+            <div style={{display:"grid",gridTemplateColumns:"repeat(7,1fr)",gap:2}}>
+              {cells.map((d,i)=>{
+                if(d===null) return <div key={"b"+i}/>;
+                const ds=dateStrFor(y,m,d), entry=entries.find(e=>e.date===ds);
+                const matches=entry&&findTag&&entryMatchesTag(entry,findCat,findTag);
+                const isToday=ds===todayD, isSel=ds===findSelectedDate;
+                const isPeriod=actualPeriodSet.has(ds), isAnt=!isPeriod&&isAnticipated(ds);
+                const cellBg=isSel?findCol.bg:isPeriod?"#F2ABA0":isAnt?"#FBE0DC":"transparent";
+                const cellBorder=isSel?`1.5px solid ${findCol.border}`:"1.5px solid transparent";
+                const numColor=isToday?headerBg:isPeriod?"#7A2318":entry?"#1F1F2E":"#C0BDCC";
+                return (
+                  <button key={ds} onClick={()=>entry&&setFindSelectedDate(ds)} style={{
+                    aspectRatio:"1",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:3,
+                    border:cellBorder,
+                    borderRadius:8,background:cellBg,
+                    cursor:entry?"pointer":"default",padding:0,
+                  }}>
+                    <span style={{fontSize:13,fontWeight:isToday||isPeriod?700:400,color:numColor}}>{d}</span>
+                    <span style={{width:6,height:6,borderRadius:"50%",background:matches?findCol.text:(entry?"#E2DFF0":"transparent")}}/>
+                  </button>
+                );
+              })}
+            </div>
+            {hasPeriodData&&<div style={{display:"flex",gap:16,marginTop:14,paddingTop:12,borderTop:"1px solid #F4F2F7"}}>
+              <div style={{display:"flex",alignItems:"center",gap:6}}><span style={{width:10,height:10,borderRadius:3,background:"#F2ABA0",display:"inline-block"}}/><span style={{fontSize:11,color:"#8A87A0"}}>Period</span></div>
+              <div style={{display:"flex",alignItems:"center",gap:6}}><span style={{width:10,height:10,borderRadius:3,background:"#FBE0DC",display:"inline-block"}}/><span style={{fontSize:11,color:"#8A87A0"}}>{cycleLegendText}</span></div>
+            </div>}
+          </div>
+        );
+      };
+
       if(!loaded) return <div style={{display:"flex",alignItems:"center",justifyContent:"center",height:"100vh",background:"#F4F2F7",color:"#4A3563"}}>Loading…</div>;
 
       const allCats=Object.keys(tags), headerBg=isFlareMode?"#7A3020":"#4A3563";
@@ -284,18 +358,65 @@
       const allSymptomsList=(tags.Symptoms??[]).filter(s=>typeof s==="string");
       const enabledScales=painScalesDef.filter(s=>s.enabled);
 
+      const RECENT_CYCLES=6;
+      const periodDates=entries.filter(e=>e.conditions?.Period?.phase==="Menstrual").map(e=>e.date).sort();
+      const periodStreaks=[];
+      periodDates.forEach(ds=>{
+        const last=periodStreaks[periodStreaks.length-1];
+        if(last){
+          const diffDays=Math.round((new Date(ds+"T12:00:00")-new Date(last[last.length-1]+"T12:00:00"))/86400000);
+          if(diffDays===1){ last.push(ds); return; }
+        }
+        periodStreaks.push([ds]);
+      });
+      const streakStarts=periodStreaks.map(s=>s[0]);
+      const cycleLengths=[];
+      for(let i=1;i<streakStarts.length;i++){
+        const diff=Math.round((new Date(streakStarts[i]+"T12:00:00")-new Date(streakStarts[i-1]+"T12:00:00"))/86400000);
+        if(diff>0) cycleLengths.push(diff);
+      }
+      const recentCycleLengths=cycleLengths.slice(-RECENT_CYCLES);
+      const haveCycleHistory=recentCycleLengths.length>0;
+      const CYCLE_LEN=haveCycleHistory?Math.round(recentCycleLengths.reduce((a,b)=>a+b,0)/recentCycleLengths.length):25;
+      const recentStreakLens=periodStreaks.slice(-RECENT_CYCLES).map(s=>s.length);
+      const periodLen=recentStreakLens.length?Math.round(recentStreakLens.reduce((a,b)=>a+b,0)/recentStreakLens.length):0;
+      const lastStreak=periodStreaks[periodStreaks.length-1];
+      const periodStart=lastStreak?lastStreak[0]:null;
+      const actualPeriodSet=new Set(periodDates);
+      const isAnticipated=(ds)=>{
+        if(!periodStart||periodLen===0) return false;
+        const diff=Math.round((new Date(ds+"T12:00:00")-new Date(periodStart+"T12:00:00"))/86400000);
+        const mod=((diff%CYCLE_LEN)+CYCLE_LEN)%CYCLE_LEN;
+        return mod<periodLen;
+      };
+      const hasPeriodData=periodStreaks.length>0;
+      const cycleLegendText=haveCycleHistory
+        ?`Anticipated (avg of last ${recentCycleLengths.length} cycle${recentCycleLengths.length>1?"s":""}, ~${CYCLE_LEN}-day cycle)`
+        :"Anticipated (not enough cycles logged yet — assuming 25 days)";
+
+      const findOptions = findCat==="Conditions" ? condDefs.map(c=>c.name) : (tags[findCat]??[]).filter(t=>typeof t==="string");
+      const findCol = CAT_COLORS[findCat]||CAT_COLORS["Body"];
+      const matchingEntries = findTag ? entries.filter(e=>entryMatchesTag(e,findCat,findTag)) : [];
+      const nowMs = Date.now();
+      const withinDays = (dateStr,n) => (nowMs-new Date(dateStr+"T12:00:00").getTime())<=n*86400000;
+      const count30 = matchingEntries.filter(e=>withinDays(e.date,30)).length;
+      const count90 = matchingEntries.filter(e=>withinDays(e.date,90)).length;
+      const groupedByMonth = [];
+      { const map={}; matchingEntries.forEach(e=>{ const d=new Date(e.date+"T12:00:00"), key=`${MONTH_NAMES[d.getMonth()]} ${d.getFullYear()}`; if(!map[key]){map[key]=[];groupedByMonth.push([key,map[key]]);} map[key].push(e); }); }
+      const selectedEntry = findSelectedDate ? entries.find(e=>e.date===findSelectedDate) : null;
+
       return (
         <div style={{minHeight:"100vh",background:"#F4F2F7",color:"#1F1F2E"}}>
           <div style={{background:headerBg,padding:"20px 20px 0",color:"white",transition:"background 0.3s"}}>
             <div style={{display:"flex",justifyContent:"space-between",alignItems:"flex-start"}}>
               <div>
                 <div style={{fontSize:12,opacity:0.65,letterSpacing:"0.1em",textTransform:"uppercase",marginBottom:4}}>Health Log</div>
-                <div style={{fontSize:20,fontWeight:600,marginBottom:16}}>{new Date().toLocaleDateString("en-GB",{weekday:"long",day:"numeric",month:"long"})}</div>
+                <div style={{fontSize:20,fontWeight:600,marginBottom:16}}>{new Date(selectedDate+"T12:00:00").toLocaleDateString("en-GB",{weekday:"long",day:"numeric",month:"long"})}</div>
               </div>
               <button onClick={toggleFlare} style={{marginTop:4,padding:"6px 14px",borderRadius:20,border:`1.5px solid ${isFlareMode?"#FF9980":"rgba(255,255,255,0.35)"}`,background:isFlareMode?"rgba(255,100,70,0.25)":"transparent",color:isFlareMode?"#FF9980":"rgba(255,255,255,0.6)",fontSize:11,fontWeight:700,cursor:"pointer",letterSpacing:"0.05em",textTransform:"uppercase"}}>{isFlareMode?"⚠ Flare ON":"Flare mode"}</button>
             </div>
             <div style={{display:"flex",gap:2}}>
-              {[["log","Today"],["history","History"],["tags","Tags"],["export","Export"]].map(([id,label])=>(
+              {[["log","Today"],["history","History"],["find","Find"],["tags","Tags"],["export","Export"]].map(([id,label])=>(
                 <button key={id} onClick={()=>setTab(id)} style={{padding:"8px 16px",background:tab===id?"white":"transparent",color:tab===id?headerBg:"rgba(255,255,255,0.6)",border:"none",borderRadius:"8px 8px 0 0",cursor:"pointer",fontSize:14,fontWeight:tab===id?700:400,transition:"all 0.15s"}}>{label}</button>
               ))}
             </div>
@@ -304,8 +425,15 @@
           <div style={{padding:"20px",maxWidth:640,margin:"0 auto"}}>
 
             {tab==="log"&&<div>
+              <div style={card}>
+                <div style={{display:"flex",gap:10,alignItems:"center"}}>
+                  <input type="date" value={selectedDate} max={todayStr()} onChange={e=>setSelectedDate(e.target.value)} style={{...inp,flex:1}}/>
+                  {selectedDate!==todayStr()&&<button onClick={()=>setSelectedDate(todayStr())} style={{padding:"9px 14px",background:"white",border:"1.5px solid #E2DFF0",borderRadius:8,color:"#4A3563",fontSize:13,fontWeight:600,cursor:"pointer",whiteSpace:"nowrap"}}>Today</button>}
+                </div>
+                {selectedDate!==todayStr()&&<div style={{fontSize:12,color:"#8A87A0",marginTop:8}}>Editing {fmtDate(selectedDate)}</div>}
+              </div>
               {isFlareMode&&<div style={{background:"#FDF0ED",border:"1px solid #E8B4A8",borderRadius:8,padding:"10px 14px",marginBottom:14,fontSize:13,color:"#7A3020",fontWeight:500}}>⚠ Flare mode on</div>}
-              {todayLogged&&<div style={{background:"#E8F5EE",border:"1px solid #A8D4B8",borderRadius:8,padding:"10px 14px",marginBottom:14,fontSize:13,color:"#2A5E3C"}}>✓ Entry saved — saving again updates it</div>}
+              {dateLogged&&<div style={{background:"#E8F5EE",border:"1px solid #A8D4B8",borderRadius:8,padding:"10px 14px",marginBottom:14,fontSize:13,color:"#2A5E3C"}}>✓ Entry saved for this day — saving again updates it</div>}
 
               {enabledScales.length>0&&<div style={card}>
                 <div style={lbl}>Pain</div>
@@ -365,7 +493,7 @@
               </div>
 
               <button onClick={saveEntry} style={{width:"100%",padding:14,border:"none",borderRadius:12,fontSize:15,fontWeight:600,cursor:"pointer",background:savedFlash?"#7AAF8E":headerBg,color:"white",transition:"background 0.2s"}}>
-                {savedFlash?"✓ Saved":todayLogged?"Update today's entry":"Save today's entry"}
+                {savedFlash?"✓ Saved":dateLogged?"Update this entry":"Save entry"}
               </button>
             </div>}
 
@@ -387,6 +515,7 @@
                       <div style={{display:"flex",flexDirection:"column",gap:4,alignItems:"flex-end",flexShrink:0}}>
                         {as2.map(([name,val])=><div key={name} style={{display:"flex",alignItems:"center",gap:5}}><span style={{fontSize:10,color:"#8A87A0"}}>{name}</span><div style={{background:PAIN_COLORS[val-1],color:"white",borderRadius:14,padding:"2px 8px",fontSize:12,fontWeight:700}}>{val}</div></div>)}
                         {as2.length===0&&<span style={{fontSize:11,color:"#C0BDCC"}}>pain not logged</span>}
+                        <button onClick={()=>goToDate(e.date)} style={{background:"none",border:"1px solid #E2DFF0",color:"#8A87A0",cursor:"pointer",fontSize:11,padding:"2px 9px",borderRadius:8,marginTop:2}}>Edit</button>
                       </div>
                     </div>
                     {e.flareMode&&e.flareData&&<div style={{background:"#FDF0ED",borderRadius:8,padding:"8px 12px",marginBottom:8,fontSize:13,color:"#7A3020",display:"flex",gap:12,flexWrap:"wrap"}}>{e.flareData.stoolCount>0&&<span>💩 {e.flareData.stoolCount}</span>}{e.flareData.consistency&&<span>{e.flareData.consistency}</span>}{e.flareData.blood&&e.flareData.blood!=="none"&&<span>blood: {e.flareData.blood}</span>}{e.flareData.nocturnal&&<span>nocturnal</span>}</div>}
@@ -397,6 +526,59 @@
                   </div>;
                 })
               }
+            </div>}
+
+            {tab==="find"&&<div>
+              {renderFindCalendar(findCol,headerBg,actualPeriodSet,isAnticipated,hasPeriodData,cycleLegendText)}
+
+              <div style={card}>
+                <div style={lbl}>Find</div>
+                <div style={{fontSize:11,color:"#8A87A0",marginBottom:12}}>Select a tag to see when it was logged</div>
+                <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:14}}>
+                  {FIND_CATS.map(c=><button key={c} onClick={()=>{setFindCat(c);setFindTag(null);setFindSelectedDate(null);}} style={{padding:"6px 13px",borderRadius:20,border:`1.5px solid ${findCat===c?"#4A3563":"#E2DFF0"}`,background:findCat===c?"#4A3563":"white",color:findCat===c?"white":"#8A87A0",fontWeight:findCat===c?700:400,fontSize:12,cursor:"pointer"}}>{c}</button>)}
+                </div>
+                <div style={row}>
+                  {findOptions.length===0
+                    ?<span style={{fontSize:13,color:"#C0BDCC",fontStyle:"italic"}}>No tags in this category yet</span>
+                    :findOptions.map(name=><button key={name} onClick={()=>{setFindTag(name);setFindSelectedDate(null);}} style={{padding:"6px 13px",borderRadius:20,border:`1.5px solid ${findTag===name?findCol.border:"#E2DFF0"}`,background:findTag===name?findCol.bg:"white",color:findTag===name?findCol.text:"#8A87A0",fontWeight:findTag===name?700:400,fontSize:13,cursor:"pointer"}}>{name}</button>)}
+                </div>
+              </div>
+
+              {findTag&&<div style={card}>
+                <div style={{display:"flex",gap:8}}>
+                  <div style={{flex:1,textAlign:"center"}}><div style={{fontSize:22,fontWeight:700,color:findCol.text}}>{count30}</div><div style={{fontSize:11,color:"#8A87A0",marginTop:2}}>last 30 days</div></div>
+                  <div style={{flex:1,textAlign:"center"}}><div style={{fontSize:22,fontWeight:700,color:findCol.text}}>{count90}</div><div style={{fontSize:11,color:"#8A87A0",marginTop:2}}>last 90 days</div></div>
+                  <div style={{flex:1,textAlign:"center"}}><div style={{fontSize:22,fontWeight:700,color:findCol.text}}>{matchingEntries.length}</div><div style={{fontSize:11,color:"#8A87A0",marginTop:2}}>all time</div></div>
+                </div>
+              </div>}
+
+              {findSelectedDate&&selectedEntry&&<div style={{...card,border:`1.5px solid ${findCol.border}`}}>
+                <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
+                  <span style={{fontSize:15,fontWeight:700}}>{fmtDate(selectedEntry.date)}</span>
+                  <div style={{display:"flex",gap:8,alignItems:"center"}}>
+                    <button onClick={()=>goToDate(selectedEntry.date)} style={{background:"none",border:"1px solid #E2DFF0",color:"#8A87A0",cursor:"pointer",fontSize:12,padding:"3px 10px",borderRadius:8}}>Edit</button>
+                    <button onClick={()=>setFindSelectedDate(null)} style={{background:"none",border:"none",color:"#C0BDCC",cursor:"pointer",fontSize:20,lineHeight:1}}>×</button>
+                  </div>
+                </div>
+                {selectedEntry.flareMode&&<div style={{fontSize:11,background:"#FDF0ED",color:"#9A4535",borderRadius:10,padding:"2px 8px",fontWeight:700,display:"inline-block",marginBottom:8}}>FLARE</div>}
+                {Object.entries(selectedEntry.painScores??{}).filter(([,v])=>v!=null).length>0&&<div style={{display:"flex",gap:10,marginBottom:8,flexWrap:"wrap"}}>{Object.entries(selectedEntry.painScores??{}).filter(([,v])=>v!=null).map(([name,val])=><div key={name} style={{display:"flex",alignItems:"center",gap:5}}><span style={{fontSize:10,color:"#8A87A0"}}>{name}</span><div style={{background:PAIN_COLORS[val-1],color:"white",borderRadius:14,padding:"2px 8px",fontSize:12,fontWeight:700}}>{val}</div></div>)}</div>}
+                {Object.entries(selectedEntry.conditions??{}).filter(([,v])=>v?.severity!=null).length>0&&<div style={{display:"flex",flexWrap:"wrap",gap:6,marginBottom:8}}>{Object.entries(selectedEntry.conditions??{}).filter(([,v])=>v?.severity!=null).map(([name,val])=><span key={name} style={{fontSize:11,background:"#E8EDF5",color:"#2D4A7A",borderRadius:10,padding:"2px 8px",fontWeight:700}}>{name} {val.severity}{val.phase?` · ${val.phase}`:""}</span>)}</div>}
+                {selectedEntry.symptoms?.length>0&&<div style={{display:"flex",flexWrap:"wrap",gap:5,marginBottom:8}}>{selectedEntry.symptoms.map(s=><span key={s} style={{background:"#EDE8F5",color:"#4A3563",borderRadius:12,padding:"2px 9px",fontSize:12}}>{s}</span>)}</div>}
+                {selectedEntry.tags?.length>0&&<div style={{display:"flex",flexWrap:"wrap",gap:5,marginBottom:8}}>{selectedEntry.tags.map(t=><span key={t} style={{background:"#F0F0F0",color:"#5A5870",borderRadius:12,padding:"2px 9px",fontSize:12}}>{t}</span>)}</div>}
+                {selectedEntry.notes&&<div style={{fontSize:13,color:"#5A5870"}}><strong>Notes:</strong> {selectedEntry.notes}</div>}
+              </div>}
+
+              {findTag&&groupedByMonth.length>0&&<div style={card}>
+                <div style={lbl}>All matches</div>
+                {groupedByMonth.map(([month,ents])=><div key={month} style={{marginBottom:14}}>
+                  <div style={{fontSize:12,fontWeight:700,color:"#8A87A0",marginBottom:6}}>{month} <span style={{fontWeight:400,color:"#C0BDCC"}}>({ents.length})</span></div>
+                  <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
+                    {ents.map(e=><button key={e.date} onClick={()=>{setFindSelectedDate(e.date); const d=new Date(e.date+"T12:00:00"); setFindMonth({y:d.getFullYear(),m:d.getMonth()});}} style={{padding:"6px 12px",borderRadius:16,border:`1.5px solid ${findCol.border}`,background:findSelectedDate===e.date?findCol.text:findCol.bg,color:findSelectedDate===e.date?"white":findCol.text,fontSize:12,fontWeight:600,cursor:"pointer"}}>{fmtDate(e.date)}</button>)}
+                  </div>
+                </div>)}
+              </div>}
+
+              {findTag&&matchingEntries.length===0&&<div style={{textAlign:"center",padding:"40px 0",color:"#8A87A0"}}><div style={{fontSize:13}}>No entries logged with this tag yet</div></div>}
             </div>}
 
             {tab==="tags"&&<div>
