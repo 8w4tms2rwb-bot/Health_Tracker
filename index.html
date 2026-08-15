@@ -42,6 +42,109 @@
     const TAGS_KEY        = "hl:tags";
     const FLARE_KEY       = "hl:flare";
     const PAIN_SCALES_KEY = "hl:painScales";
+    const MEDS_KEY        = "hl:medications";
+    const MED_CHANGES_KEY = "hl:medChanges";
+    const uid = () => Date.now().toString(36)+Math.random().toString(36).slice(2,8);
+
+    const migrateData = (loadedTags, loadedEntries) => {
+      let tags = loadedTags, entries = loadedEntries, migrated = false;
+
+      // Step 1: legacy "Body" category -> merge into Symptoms + "Aches & pains" condition
+      if(tags.Body){
+        const bodyTags   = tags.Body ?? [];
+        const painLike   = ["back pain","right shoulder pain","sciatica"];
+        const hungerTags = (tags["Food triggers"]??[]).filter(f=>f==="naturally more hungry"||f==="naturally less hungry");
+        const movedToSymptoms = new Set([...bodyTags, ...hungerTags]);
+
+        const nextTags = {...tags};
+        const symSet = new Set(nextTags.Symptoms ?? []);
+        bodyTags.forEach(t=>symSet.add(t));
+        hungerTags.forEach(t=>symSet.add(t));
+        nextTags.Symptoms = Array.from(symSet);
+        nextTags["Food triggers"] = (nextTags["Food triggers"]??[]).filter(f=>!hungerTags.includes(f));
+
+        const conds = [...(nextTags.Conditions ?? [])];
+        let aches = conds.find(c=>c.name==="Aches & pains");
+        if(!aches){ aches={type:"condition",name:"Aches & pains",scale:5,phases:[],quickSymptoms:[]}; conds.push(aches); }
+        const qs=new Set(aches.quickSymptoms??[]);
+        painLike.forEach(p=>{ if(bodyTags.includes(p)) qs.add(p); });
+        aches={...aches,quickSymptoms:Array.from(qs)};
+        nextTags.Conditions = conds.map(c=>c.name==="Aches & pains"?aches:c);
+        delete nextTags.Body;
+
+        entries = entries.map(e=>{
+          const oldTags = e.tags ?? [];
+          const toMove = oldTags.filter(t=>movedToSymptoms.has(t));
+          if(toMove.length===0) return e;
+          const newSymptoms = Array.from(new Set([...(e.symptoms??[]), ...toMove]));
+          const newTags = oldTags.filter(t=>!movedToSymptoms.has(t));
+          return {...e, symptoms:newSymptoms, tags:newTags};
+        });
+        tags = nextTags;
+        migrated = true;
+      }
+
+      // Step 2: "good body image"/"poor body image" -> move from Symptoms (physical) to Mood & Energy (mental health)
+      const moveToMood = ["good body image","poor body image"];
+      const symList = tags.Symptoms ?? [];
+      if(moveToMood.some(m=>symList.includes(m))){
+        const nextTags = {...tags};
+        nextTags.Symptoms = symList.filter(s=>!moveToMood.includes(s));
+        const moodSet = new Set(nextTags["Mood & Energy"] ?? []);
+        moveToMood.forEach(m=>moodSet.add(m));
+        nextTags["Mood & Energy"] = Array.from(moodSet);
+        tags = nextTags;
+
+        entries = entries.map(e=>{
+          const oldSymptoms = e.symptoms ?? [];
+          const toMove = oldSymptoms.filter(s=>moveToMood.includes(s));
+          if(toMove.length===0) return e;
+          const newSymptoms = oldSymptoms.filter(s=>!moveToMood.includes(s));
+          const newTags = Array.from(new Set([...(e.tags??[]), ...toMove]));
+          return {...e, symptoms:newSymptoms, tags:newTags};
+        });
+        migrated = true;
+      }
+
+      // Step 3: Mood & Energy becomes output/symptom-role; split "stress" into "stressful event" (input) + "felt stressed" (symptom);
+      // move behavior/exposure items (workout done, poor sleep, good sleep) into a new "Daily inputs" input-role category
+      const moodList3 = tags["Mood & Energy"] ?? [];
+      const needsStep3 = moodList3.includes("stress") || moodList3.includes("workout done") || moodList3.includes("poor sleep") || moodList3.includes("good sleep") || !tags["Daily inputs"];
+      if(needsStep3){
+        const nextTags = {...tags};
+        let mood = [...(nextTags["Mood & Energy"] ?? [])];
+        let dailyInputs = [...(nextTags["Daily inputs"] ?? [])];
+
+        ["workout done","poor sleep","good sleep"].forEach(t=>{
+          if(mood.includes(t)){ mood = mood.filter(x=>x!==t); if(!dailyInputs.includes(t)) dailyInputs.push(t); }
+        });
+        if(mood.includes("stress")){
+          mood = mood.filter(x=>x!=="stress");
+          if(!dailyInputs.includes("stressful event")) dailyInputs.push("stressful event");
+        }
+        if(!mood.includes("felt stressed")) mood.push("felt stressed");
+
+        nextTags["Mood & Energy"] = mood;
+        nextTags["Daily inputs"] = dailyInputs;
+
+        // any tag now belonging to the output-role Mood & Energy list, but still sitting in an entry's input-role `tags`
+        // field from before the role change, needs to move over to `symptoms`. ("stress" is deliberately left as-is.)
+        const outputMoodTags = new Set(mood.filter(t=>t!=="felt stressed"));
+        entries = entries.map(e=>{
+          const oldTags = e.tags ?? [];
+          const toMove = oldTags.filter(t=>outputMoodTags.has(t));
+          if(toMove.length===0) return e;
+          const newSymptoms = Array.from(new Set([...(e.symptoms??[]), ...toMove]));
+          const newTags = oldTags.filter(t=>!outputMoodTags.has(t));
+          return {...e, symptoms:newSymptoms, tags:newTags};
+        });
+
+        tags = nextTags;
+        migrated = true;
+      }
+
+      return {tags, entries, migrated};
+    };
 
     const DEFAULT_PAIN_SCALES = [
       { name: "Gut pain",  enabled: true },
@@ -68,16 +171,21 @@
           quickSymptoms:["fatigue","headache","nausea","low energy","difficulty with words",
             "fever","chills","runny nose","sneezing","sore throat","congestion",
             "cough","body aches","loss of appetite","dizziness"] },
+        { type:"condition", name:"Aches & pains", scale:5,
+          phases:[],
+          quickSymptoms:["back pain","right shoulder pain","sciatica"] },
       ],
       "Symptoms": [
         "fatigue","nausea","vomiting","bloating","cramping","urgency",
         "diarrhea","discomfort after eating","light sensitivity","vision changes",
         "neck pain","brain fog","frequent urination","headache",
-        "difficulty with words","yawning","oversensitization","deja vu"
+        "difficulty with words","yawning","oversensitization","deja vu",
+        "back pain","right shoulder pain","sciatica","strong",
+        "naturally more hungry","naturally less hungry"
       ],
-      "Food triggers": ["allium exposure","hazelnut","coconut","watermelon","high insoluble fiber","high sugar","naturally more hungry","naturally less hungry","red meat"],
-      "Mood & Energy": ["stress","good day","hard day","low energy","good energy","workout done","poor sleep","good sleep"],
-      "Body":          ["back pain","strong","good body image","poor body image","right shoulder pain","sciatica"],
+      "Mood & Energy": ["good day","hard day","low energy","good energy","good body image","poor body image","felt stressed"],
+      "Food triggers": ["allium exposure","hazelnut","coconut","watermelon","high insoluble fiber","high sugar","red meat"],
+      "Daily inputs": ["workout done","poor sleep","good sleep","stressful event"],
     };
 
     const PAIN_COLORS  = ["#6B9E71","#7DAE74","#92BB78","#ADCA7C","#C8C97E","#D4B46A","#D49856","#CA7A48","#C0603A","#B5452E"];
@@ -89,15 +197,25 @@
       "Symptoms":      {bg:"#EDE8F5",text:"#4A3563",border:"#C4B8E0"},
       "Food triggers": {bg:"#E8F5EE",text:"#2A5E3C",border:"#A8D4B8"},
       "Mood & Energy": {bg:"#FDF0E8",text:"#7A3B2A",border:"#E0C0A8"},
+      "Daily inputs":  {bg:"#FBF3D9",text:"#8A6D1F",border:"#E8D190"},
       "Body":          {bg:"#F0EDF5",text:"#5A3A6B",border:"#C8B8DC"},
+      "Medications":   {bg:"#E5F3F0",text:"#1F6B5C",border:"#A8D8CC"},
     };
 
-    const FIND_CATS = ["Conditions","Symptoms","Food triggers","Mood & Energy","Body"];
+    const FIND_CATS = ["Conditions","Symptoms","Mood & Energy","Food triggers","Daily inputs","Medications"];
+    const CAT_LABELS = {"Symptoms":"Physical symptoms","Mood & Energy":"Mental health symptoms"};
+    const catLabel = (cat) => CAT_LABELS[cat] || cat;
+    // role: "symptom" = output, stored per-entry in `symptoms`; "input" = exposure, stored per-entry in `tags`
+    const CAT_ROLE = {"Symptoms":"symptom","Mood & Energy":"symptom","Food triggers":"input","Daily inputs":"input"};
+    const CAT_SUBTITLES = {
+      "Symptoms": "Logged without assuming cause — patterns reveal themselves over time",
+      "Food triggers": "Notable food events today — trigger foods, patterns",
+    };
     const entryMatchesTag = (entry, cat, name) => {
       if(!entry) return false;
       if(cat==="Conditions") return entry.conditions?.[name]?.severity!=null;
-      if(cat==="Symptoms") return (entry.symptoms||[]).includes(name);
-      return (entry.tags||[]).includes(name);
+      const role = CAT_ROLE[cat] || "input";
+      return role==="symptom" ? (entry.symptoms||[]).includes(name) : (entry.tags||[]).includes(name);
     };
     const pad2         = (n) => String(n).padStart(2,"0");
     const dateStrFor   = (y,m,day) => `${y}-${pad2(m+1)}-${pad2(day)}`;
@@ -130,6 +248,8 @@
       const [painScalesDef, setPainScalesDef] = useState(DEFAULT_PAIN_SCALES);
       const [loaded,        setLoaded]        = useState(false);
       const [isFlareMode,   setIsFlareMode]   = useState(false);
+      const [medications,   setMedications]   = useState([]);
+      const [medChanges,    setMedChanges]    = useState([]);
 
       const [painScores,  setPainScores]  = useState({});
       const [symptoms,    setSymptoms]    = useState([]);
@@ -151,16 +271,32 @@
       const [condSymInputs, setCondSymInputs] = useState({});
       const [newScaleName,  setNewScaleName]  = useState("");
 
+      const [showAddMed,      setShowAddMed]      = useState(false);
+      const [newMedName,      setNewMedName]      = useState("");
+      const [newMedDose,      setNewMedDose]      = useState("");
+      const [newMedSchedule,  setNewMedSchedule]  = useState("daily");
+      const [newMedInterval,  setNewMedInterval]  = useState("");
+      const [openMedEdit,     setOpenMedEdit]     = useState({});
+      const [doseChangeInputs,setDoseChangeInputs]= useState({});
+      const [medActionDate,   setMedActionDate]   = useState({});
+      const [medDoseInput,    setMedDoseInput]    = useState({});
+
       const [findCat,          setFindCat]          = useState("Symptoms");
       const [findTag,          setFindTag]          = useState(null);
       const [findMonth,        setFindMonth]        = useState(()=>{const d=new Date();return {y:d.getFullYear(),m:d.getMonth()};});
       const [findSelectedDate, setFindSelectedDate] = useState(null);
+      const [openTagSection,   setOpenTagSection]   = useState({});
 
       useEffect(() => {
-        const e=LS.get(ENTRIES_KEY);     if(e) try{setEntries(JSON.parse(e));}catch{}
-        const t=LS.get(TAGS_KEY);        if(t) try{setTags(JSON.parse(t));}catch{}
+        const e=LS.get(ENTRIES_KEY); let loadedEntries=[]; if(e) try{loadedEntries=JSON.parse(e);}catch{}
+        const t=LS.get(TAGS_KEY);    let loadedTags=DEFAULT_TAGS; if(t) try{loadedTags=JSON.parse(t);}catch{}
+        const {tags:migTags, entries:migEntries, migrated} = migrateData(loadedTags, loadedEntries);
+        setTags(migTags); setEntries(migEntries);
+        if(migrated){ LS.set(TAGS_KEY, JSON.stringify(migTags)); LS.set(ENTRIES_KEY, JSON.stringify(migEntries)); }
         const f=LS.get(FLARE_KEY);       if(f) try{setIsFlareMode(JSON.parse(f));}catch{}
         const p=LS.get(PAIN_SCALES_KEY); if(p) try{setPainScalesDef(JSON.parse(p));}catch{}
+        const md=LS.get(MEDS_KEY);        if(md) try{setMedications(JSON.parse(md));}catch{}
+        const mc=LS.get(MED_CHANGES_KEY); if(mc) try{setMedChanges(JSON.parse(mc));}catch{}
         setLoaded(true);
       }, []);
 
@@ -190,6 +326,43 @@
       const saveTags       = (next) => { setTags(next); LS.set(TAGS_KEY, JSON.stringify(next)); };
       const savePainScales = (next) => { setPainScalesDef(next); LS.set(PAIN_SCALES_KEY, JSON.stringify(next)); };
       const toggleFlare    = () => { const n=!isFlareMode; setIsFlareMode(n); LS.set(FLARE_KEY,JSON.stringify(n)); };
+
+      const saveMeds        = (next) => { setMedications(next); LS.set(MEDS_KEY, JSON.stringify(next)); };
+      const saveMedChanges  = (next) => { setMedChanges(next); LS.set(MED_CHANGES_KEY, JSON.stringify(next)); };
+
+      const addMedication = () => {
+        const name=newMedName.trim();
+        if(!name) return;
+        const med={id:uid(),name,dose:newMedDose.trim(),schedule:newMedSchedule,
+          intervalDays:newMedSchedule==="interval"?(parseInt(newMedInterval)||null):null,active:true};
+        saveMeds([...medications,med]);
+        saveMedChanges([...medChanges,{id:uid(),medId:med.id,date:todayStr(),type:"started",dose:med.dose}]);
+        setNewMedName(""); setNewMedDose(""); setNewMedSchedule("daily"); setNewMedInterval(""); setShowAddMed(false);
+      };
+      const changeDose = (medId,newDose,date) => {
+        if(!newDose.trim()) return;
+        saveMeds(medications.map(m=>m.id===medId?{...m,dose:newDose.trim()}:m));
+        saveMedChanges([...medChanges,{id:uid(),medId,date,type:"dose_changed",dose:newDose.trim()}]);
+        setDoseChangeInputs(p=>({...p,[medId]:{date:todayStr(),dose:""}}));
+      };
+      const stopMedication = (medId,date) => {
+        saveMeds(medications.map(m=>m.id===medId?{...m,active:false}:m));
+        saveMedChanges([...medChanges,{id:uid(),medId,date,type:"stopped",dose:null}]);
+      };
+      const restartMedication = (medId,date) => {
+        saveMeds(medications.map(m=>m.id===medId?{...m,active:true}:m));
+        saveMedChanges([...medChanges,{id:uid(),medId,date,type:"started",dose:medications.find(m=>m.id===medId)?.dose}]);
+      };
+      const deleteMedication = (medId) => {
+        saveMeds(medications.filter(m=>m.id!==medId));
+        saveMedChanges(medChanges.filter(c=>c.medId!==medId));
+      };
+      const toggleTaken = (medId,date) => {
+        const existing=medChanges.find(c=>c.medId===medId&&c.date===date&&c.type==="taken");
+        if(existing) saveMedChanges(medChanges.filter(c=>c.id!==existing.id));
+        else saveMedChanges([...medChanges,{id:uid(),medId,date,type:"taken",dose:null}]);
+      };
+      const toggleMedEdit = (medId) => setOpenMedEdit(p=>({...p,[medId]:!p[medId]}));
 
       const saveEntry = () => {
         const entry={date:selectedDate,painScores,symptoms,conditions,tags:otherTags,meals,notes,
@@ -280,7 +453,7 @@
                           </div>
                         </div>
                         {phases?.length>0&&<div style={{marginBottom:16}}><div style={{fontSize:12,fontWeight:700,color:"#5A70A0",marginBottom:10,textTransform:"uppercase",letterSpacing:"0.06em"}}>Phase</div><div style={row}>{phases.map(ph=>{const on=cond?.phase===ph; return <button key={ph} onClick={()=>toggleCondPhase(name,ph)} style={{padding:"6px 13px",borderRadius:20,border:`1.5px solid ${on?"#B0C0DC":"#DDE2F0"}`,background:on?"#E8EDF5":"white",color:on?"#2D4A7A":"#7A86A0",fontWeight:on?700:400,fontSize:13,cursor:"pointer",transition:"all 0.1s"}}>{ph}</button>;})}</div></div>}
-                        {quickSymptoms?.length>0&&<div><div style={{fontSize:12,fontWeight:700,color:"#5A70A0",marginBottom:4,textTransform:"uppercase",letterSpacing:"0.06em"}}>Quick-add symptoms</div><div style={{fontSize:11,color:"#8A87A0",marginBottom:10}}>Adds to Symptoms — not labeled as {name.toLowerCase()}-caused</div><div style={row}>{quickSymptoms.map(qs=>{const on=symptoms.includes(qs); return <button key={qs} onClick={()=>toggleSymptom(qs)} style={{padding:"5px 11px",borderRadius:16,border:`1.5px solid ${on?"#C4B8E0":"#DDE2F0"}`,background:on?"#EDE8F5":"white",color:on?"#4A3563":"#7A86A0",fontWeight:on?700:400,fontSize:12,cursor:"pointer",transition:"all 0.1s"}}>{qs}</button>;})}</div></div>}
+                        {quickSymptoms?.length>0&&<div><div style={{fontSize:12,fontWeight:700,color:"#5A70A0",marginBottom:4,textTransform:"uppercase",letterSpacing:"0.06em"}}>Quick-add symptoms</div><div style={{fontSize:11,color:"#8A87A0",marginBottom:10}}>Adds to Physical symptoms — not labeled as {name.toLowerCase()}-caused</div><div style={row}>{quickSymptoms.map(qs=>{const on=symptoms.includes(qs); return <button key={qs} onClick={()=>toggleSymptom(qs)} style={{padding:"5px 11px",borderRadius:16,border:`1.5px solid ${on?"#C4B8E0":"#DDE2F0"}`,background:on?"#EDE8F5":"white",color:on?"#4A3563":"#7A86A0",fontWeight:on?700:400,fontSize:12,cursor:"pointer",transition:"all 0.1s"}}>{qs}</button>;})}</div></div>}
                       </div>
                     )}
                   </div>
@@ -289,25 +462,29 @@
             </div>
           </div>
         );
-        if(cat==="Symptoms") return (
-          <div key={cat} style={card}>
-            <div style={lbl}>Symptoms</div>
-            <div style={{fontSize:11,color:"#8A87A0",marginBottom:10}}>Logged without assuming cause — patterns reveal themselves over time</div>
-            <div style={row}>{defs.map(s=>typeof s==="string"&&<button key={s} onClick={()=>toggleSymptom(s)} style={{padding:"6px 13px",borderRadius:20,border:`1.5px solid ${symptoms.includes(s)?col.border:"#E2DFF0"}`,background:symptoms.includes(s)?col.bg:"white",color:symptoms.includes(s)?col.text:"#8A87A0",fontWeight:symptoms.includes(s)?700:400,fontSize:13,cursor:"pointer",transition:"all 0.1s"}}>{s}</button>)}</div>
-          </div>
-        );
-        if(cat==="Food triggers") return null;
-        return (
-          <div key={cat} style={card}>
-            <div style={lbl}>{cat}</div>
-            <div style={row}>{defs.length===0?<span style={{fontSize:13,color:"#C0BDCC",fontStyle:"italic"}}>No tags — add in Tags tab</span>:defs.map(def=>typeof def==="string"&&<button key={def} onClick={()=>toggleOtherTag(def)} style={{padding:"6px 13px",borderRadius:20,border:`1.5px solid ${otherTags.includes(def)?col.border:"#E2DFF0"}`,background:otherTags.includes(def)?col.bg:"white",color:otherTags.includes(def)?col.text:"#8A87A0",fontWeight:otherTags.includes(def)?700:400,fontSize:13,cursor:"pointer",transition:"all 0.1s"}}>{def}</button>)}</div>
-          </div>
-        );
+        {
+          const role=CAT_ROLE[cat]||"input";
+          const activeList=role==="symptom"?symptoms:otherTags;
+          const toggleFn=role==="symptom"?toggleSymptom:toggleOtherTag;
+          const activeCount=defs.filter(def=>typeof def==="string"&&activeList.includes(def)).length;
+          const isOpen=openTagSection[cat] ?? (activeCount>0);
+          const subtitle=CAT_SUBTITLES[cat];
+          return (
+            <div key={cat} style={card}>
+              <button onClick={()=>setOpenTagSection(p=>({...p,[cat]:!isOpen}))} style={{background:"none",border:"none",padding:0,cursor:"pointer",width:"100%",display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:isOpen?12:0}}>
+                <span style={lbl}>{catLabel(cat)}{activeCount>0&&<span style={{marginLeft:8,fontWeight:400,textTransform:"none",letterSpacing:"normal",color:col.text}}>({activeCount} selected)</span>}</span>
+                <span style={{fontSize:11,color:"#8A87A0"}}>{isOpen?"▲":"▼"}</span>
+              </button>
+              {isOpen&&<>
+                {subtitle&&<div style={{fontSize:11,color:"#8A87A0",marginBottom:10}}>{subtitle}</div>}
+                <div style={row}>{defs.length===0?<span style={{fontSize:13,color:"#C0BDCC",fontStyle:"italic"}}>No tags — add in Tags tab</span>:defs.map(def=>typeof def==="string"&&<button key={def} onClick={()=>toggleFn(def)} style={{padding:"6px 13px",borderRadius:20,border:`1.5px solid ${activeList.includes(def)?col.border:"#E2DFF0"}`,background:activeList.includes(def)?col.bg:"white",color:activeList.includes(def)?col.text:"#8A87A0",fontWeight:activeList.includes(def)?700:400,fontSize:13,cursor:"pointer",transition:"all 0.1s"}}>{def}</button>)}</div>
+              </>}
+            </div>
+          );
+        }
       };
 
-      const renderFoodTriggers=()=>{ const defs=tags["Food triggers"]??[],col=CAT_COLORS["Food triggers"]; if(defs.length===0) return null; return <div style={card}><div style={lbl}>Food notes</div><div style={{fontSize:11,color:"#8A87A0",marginBottom:10}}>Notable food events today — trigger foods, patterns</div><div style={row}>{defs.map(def=>typeof def==="string"&&<button key={def} onClick={()=>toggleOtherTag(def)} style={{padding:"6px 13px",borderRadius:20,border:`1.5px solid ${otherTags.includes(def)?col.border:"#E2DFF0"}`,background:otherTags.includes(def)?col.bg:"white",color:otherTags.includes(def)?col.text:"#8A87A0",fontWeight:otherTags.includes(def)?700:400,fontSize:13,cursor:"pointer",transition:"all 0.1s"}}>{def}</button>)}</div></div>; };
-
-      const renderFindCalendar=(findCol,headerBg,actualPeriodSet,isAnticipated,hasPeriodData,cycleLegendText)=>{
+      const renderFindCalendar=(findCol,headerBg,actualPeriodSet,isAnticipated,hasPeriodData,cycleLegendText,findMatchFn,hasDataOnDate)=>{
         const {y,m}=findMonth, dim=daysInMonth(y,m), lead=firstWeekdayMon(y,m), todayD=todayStr();
         const cells=[]; for(let i=0;i<lead;i++) cells.push(null); for(let d=1;d<=dim;d++) cells.push(d);
         return (
@@ -323,22 +500,22 @@
             <div style={{display:"grid",gridTemplateColumns:"repeat(7,1fr)",gap:2}}>
               {cells.map((d,i)=>{
                 if(d===null) return <div key={"b"+i}/>;
-                const ds=dateStrFor(y,m,d), entry=entries.find(e=>e.date===ds);
-                const matches=entry&&findTag&&entryMatchesTag(entry,findCat,findTag);
+                const ds=dateStrFor(y,m,d), hasData=hasDataOnDate(ds);
+                const matches=findTag&&findMatchFn(ds);
                 const isToday=ds===todayD, isSel=ds===findSelectedDate;
                 const isPeriod=actualPeriodSet.has(ds), isAnt=!isPeriod&&isAnticipated(ds);
                 const cellBg=isSel?findCol.bg:isPeriod?"#F2ABA0":isAnt?"#FBE0DC":"transparent";
                 const cellBorder=isSel?`1.5px solid ${findCol.border}`:"1.5px solid transparent";
-                const numColor=isToday?headerBg:isPeriod?"#7A2318":entry?"#1F1F2E":"#C0BDCC";
+                const numColor=isToday?headerBg:isPeriod?"#7A2318":hasData?"#1F1F2E":"#C0BDCC";
                 return (
-                  <button key={ds} onClick={()=>entry&&setFindSelectedDate(ds)} style={{
+                  <button key={ds} onClick={()=>hasData&&setFindSelectedDate(ds)} style={{
                     aspectRatio:"1",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",gap:3,
                     border:cellBorder,
                     borderRadius:8,background:cellBg,
-                    cursor:entry?"pointer":"default",padding:0,
+                    cursor:hasData?"pointer":"default",padding:0,
                   }}>
                     <span style={{fontSize:13,fontWeight:isToday||isPeriod?700:400,color:numColor}}>{d}</span>
-                    <span style={{width:6,height:6,borderRadius:"50%",background:matches?findCol.text:(entry?"#E2DFF0":"transparent")}}/>
+                    <span style={{width:6,height:6,borderRadius:"50%",background:matches?findCol.text:(hasData?"#E2DFF0":"transparent")}}/>
                   </button>
                 );
               })}
@@ -390,20 +567,54 @@
         return mod<periodLen;
       };
       const hasPeriodData=periodStreaks.length>0;
+
+      const kcalEntries=entries.map(e=>({date:e.date,kcal:totalKcal(e.meals)})).filter(e=>e.kcal!=null);
+      const avgKcalLogged=kcalEntries.length?Math.round(kcalEntries.reduce((a,b)=>a+b.kcal,0)/kcalEntries.length):null;
+      const last7StartD=new Date(); last7StartD.setDate(last7StartD.getDate()-6);
+      const last7StartStr=last7StartD.toLocaleDateString("en-CA");
+      const last7Kcal=kcalEntries.filter(e=>e.date>=last7StartStr&&e.date<=todayStr());
+      const last7Total=last7Kcal.reduce((a,b)=>a+b.kcal,0);
+      const last7Count=last7Kcal.length;
       const cycleLegendText=haveCycleHistory
         ?`Anticipated (avg of last ${recentCycleLengths.length} cycle${recentCycleLengths.length>1?"s":""}, ~${CYCLE_LEN}-day cycle)`
         :"Anticipated (not enough cycles logged yet — assuming 25 days)";
 
-      const findOptions = findCat==="Conditions" ? condDefs.map(c=>c.name) : (tags[findCat]??[]).filter(t=>typeof t==="string");
+      const activeMeds    = medications.filter(m=>m.active);
+      const inactiveMeds  = medications.filter(m=>!m.active);
+      const asNeededMeds  = activeMeds.filter(m=>m.schedule==="as-needed");
+      const takenDatesFor = (medId) => medChanges.filter(c=>c.medId===medId&&c.type==="taken").map(c=>c.date).sort();
+      const lastTakenFor  = (medId) => { const d=takenDatesFor(medId); return d.length?d[d.length-1]:null; };
+      const historyFor    = (medId) => medChanges.filter(c=>c.medId===medId&&c.type!=="taken").sort((a,b)=>b.date.localeCompare(a.date));
+      const takenCount30For = (medId) => takenDatesFor(medId).filter(d=>withinDays30(d)).length;
+      const getMedActionDate = (medId) => medActionDate[medId] || todayStr();
+      const nowMs2=Date.now();
+      const withinDays30 = (ds) => (nowMs2-new Date(ds+"T12:00:00").getTime())<=30*86400000;
+
+      const findOptions = findCat==="Conditions" ? condDefs.map(c=>c.name)
+        : findCat==="Medications" ? medications.map(m=>m.name)
+        : (tags[findCat]??[]).filter(t=>typeof t==="string");
       const findCol = CAT_COLORS[findCat]||CAT_COLORS["Body"];
-      const matchingEntries = findTag ? entries.filter(e=>entryMatchesTag(e,findCat,findTag)) : [];
       const nowMs = Date.now();
       const withinDays = (dateStr,n) => (nowMs-new Date(dateStr+"T12:00:00").getTime())<=n*86400000;
-      const count30 = matchingEntries.filter(e=>withinDays(e.date,30)).length;
-      const count90 = matchingEntries.filter(e=>withinDays(e.date,90)).length;
+      const findMatchFn = (dateStr) => {
+        if(!findTag) return false;
+        if(findCat==="Medications"){
+          const med=medications.find(m=>m.name===findTag);
+          if(!med) return false;
+          return medChanges.some(c=>c.medId===med.id&&c.date===dateStr&&c.type==="taken");
+        }
+        const entry=entries.find(e=>e.date===dateStr);
+        return entryMatchesTag(entry,findCat,findTag);
+      };
+      const hasDataOnDate = (dateStr) => entries.some(e=>e.date===dateStr) || medChanges.some(c=>c.type==="taken"&&c.date===dateStr);
+      const allKnownDates = Array.from(new Set([...entries.map(e=>e.date),...medChanges.filter(c=>c.type==="taken").map(c=>c.date)])).sort((a,b)=>b.localeCompare(a));
+      const matchingDates = findTag ? allKnownDates.filter(findMatchFn) : [];
+      const count30 = matchingDates.filter(d=>withinDays(d,30)).length;
+      const count90 = matchingDates.filter(d=>withinDays(d,90)).length;
       const groupedByMonth = [];
-      { const map={}; matchingEntries.forEach(e=>{ const d=new Date(e.date+"T12:00:00"), key=`${MONTH_NAMES[d.getMonth()]} ${d.getFullYear()}`; if(!map[key]){map[key]=[];groupedByMonth.push([key,map[key]]);} map[key].push(e); }); }
+      { const map={}; matchingDates.forEach(d=>{ const dd=new Date(d+"T12:00:00"), key=`${MONTH_NAMES[dd.getMonth()]} ${dd.getFullYear()}`; if(!map[key]){map[key]=[];groupedByMonth.push([key,map[key]]);} map[key].push(d); }); }
       const selectedEntry = findSelectedDate ? entries.find(e=>e.date===findSelectedDate) : null;
+      const selectedDayMeds = findSelectedDate ? medChanges.filter(c=>c.type==="taken"&&c.date===findSelectedDate).map(c=>medications.find(m=>m.id===c.medId)).filter(Boolean) : [];
 
       return (
         <div style={{minHeight:"100vh",background:"#F4F2F7",color:"#1F1F2E"}}>
@@ -416,7 +627,7 @@
               <button onClick={toggleFlare} style={{marginTop:4,padding:"6px 14px",borderRadius:20,border:`1.5px solid ${isFlareMode?"#FF9980":"rgba(255,255,255,0.35)"}`,background:isFlareMode?"rgba(255,100,70,0.25)":"transparent",color:isFlareMode?"#FF9980":"rgba(255,255,255,0.6)",fontSize:11,fontWeight:700,cursor:"pointer",letterSpacing:"0.05em",textTransform:"uppercase"}}>{isFlareMode?"⚠ Flare ON":"Flare mode"}</button>
             </div>
             <div style={{display:"flex",gap:2}}>
-              {[["log","Today"],["history","History"],["find","Find"],["tags","Tags"],["export","Export"]].map(([id,label])=>(
+              {[["log","Today"],["history","History"],["find","Find"],["tags","Tags"],["export","Export"],["meds","Meds"]].map(([id,label])=>(
                 <button key={id} onClick={()=>setTab(id)} style={{padding:"8px 16px",background:tab===id?"white":"transparent",color:tab===id?headerBg:"rgba(255,255,255,0.6)",border:"none",borderRadius:"8px 8px 0 0",cursor:"pointer",fontSize:14,fontWeight:tab===id?700:400,transition:"all 0.15s"}}>{label}</button>
               ))}
             </div>
@@ -461,7 +672,16 @@
               </div>}
 
               {allCats.map(cat=>renderCat(cat))}
-              {renderFoodTriggers()}
+
+              {asNeededMeds.length>0&&<div style={card}>
+                <div style={lbl}>Medications taken</div>
+                <div style={row}>
+                  {asNeededMeds.map(m=>{
+                    const taken=medChanges.some(c=>c.medId===m.id&&c.date===selectedDate&&c.type==="taken");
+                    return <button key={m.id} onClick={()=>toggleTaken(m.id,selectedDate)} style={{padding:"6px 13px",borderRadius:20,border:`1.5px solid ${taken?"#A8D8CC":"#E2DFF0"}`,background:taken?"#E5F3F0":"white",color:taken?"#1F6B5C":"#8A87A0",fontWeight:taken?700:400,fontSize:13,cursor:"pointer"}}>{taken?"✓ ":""}{m.name}{m.dose?` (${m.dose})`:""}</button>;
+                  })}
+                </div>
+              </div>}
 
               <div style={card}>
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
@@ -529,13 +749,13 @@
             </div>}
 
             {tab==="find"&&<div>
-              {renderFindCalendar(findCol,headerBg,actualPeriodSet,isAnticipated,hasPeriodData,cycleLegendText)}
+              {renderFindCalendar(findCol,headerBg,actualPeriodSet,isAnticipated,hasPeriodData,cycleLegendText,findMatchFn,hasDataOnDate)}
 
               <div style={card}>
                 <div style={lbl}>Find</div>
                 <div style={{fontSize:11,color:"#8A87A0",marginBottom:12}}>Select a tag to see when it was logged</div>
                 <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:14}}>
-                  {FIND_CATS.map(c=><button key={c} onClick={()=>{setFindCat(c);setFindTag(null);setFindSelectedDate(null);}} style={{padding:"6px 13px",borderRadius:20,border:`1.5px solid ${findCat===c?"#4A3563":"#E2DFF0"}`,background:findCat===c?"#4A3563":"white",color:findCat===c?"white":"#8A87A0",fontWeight:findCat===c?700:400,fontSize:12,cursor:"pointer"}}>{c}</button>)}
+                  {FIND_CATS.map(c=><button key={c} onClick={()=>{setFindCat(c);setFindTag(null);setFindSelectedDate(null);}} style={{padding:"6px 13px",borderRadius:20,border:`1.5px solid ${findCat===c?"#4A3563":"#E2DFF0"}`,background:findCat===c?"#4A3563":"white",color:findCat===c?"white":"#8A87A0",fontWeight:findCat===c?700:400,fontSize:12,cursor:"pointer"}}>{catLabel(c)}</button>)}
                 </div>
                 <div style={row}>
                   {findOptions.length===0
@@ -548,37 +768,39 @@
                 <div style={{display:"flex",gap:8}}>
                   <div style={{flex:1,textAlign:"center"}}><div style={{fontSize:22,fontWeight:700,color:findCol.text}}>{count30}</div><div style={{fontSize:11,color:"#8A87A0",marginTop:2}}>last 30 days</div></div>
                   <div style={{flex:1,textAlign:"center"}}><div style={{fontSize:22,fontWeight:700,color:findCol.text}}>{count90}</div><div style={{fontSize:11,color:"#8A87A0",marginTop:2}}>last 90 days</div></div>
-                  <div style={{flex:1,textAlign:"center"}}><div style={{fontSize:22,fontWeight:700,color:findCol.text}}>{matchingEntries.length}</div><div style={{fontSize:11,color:"#8A87A0",marginTop:2}}>all time</div></div>
+                  <div style={{flex:1,textAlign:"center"}}><div style={{fontSize:22,fontWeight:700,color:findCol.text}}>{matchingDates.length}</div><div style={{fontSize:11,color:"#8A87A0",marginTop:2}}>all time</div></div>
                 </div>
               </div>}
 
-              {findSelectedDate&&selectedEntry&&<div style={{...card,border:`1.5px solid ${findCol.border}`}}>
+              {findSelectedDate&&(selectedEntry||selectedDayMeds.length>0)&&<div style={{...card,border:`1.5px solid ${findCol.border}`}}>
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:10}}>
-                  <span style={{fontSize:15,fontWeight:700}}>{fmtDate(selectedEntry.date)}</span>
+                  <span style={{fontSize:15,fontWeight:700}}>{fmtDate(findSelectedDate)}</span>
                   <div style={{display:"flex",gap:8,alignItems:"center"}}>
-                    <button onClick={()=>goToDate(selectedEntry.date)} style={{background:"none",border:"1px solid #E2DFF0",color:"#8A87A0",cursor:"pointer",fontSize:12,padding:"3px 10px",borderRadius:8}}>Edit</button>
+                    <button onClick={()=>goToDate(findSelectedDate)} style={{background:"none",border:"1px solid #E2DFF0",color:"#8A87A0",cursor:"pointer",fontSize:12,padding:"3px 10px",borderRadius:8}}>{selectedEntry?"Edit":"+ Log this day"}</button>
                     <button onClick={()=>setFindSelectedDate(null)} style={{background:"none",border:"none",color:"#C0BDCC",cursor:"pointer",fontSize:20,lineHeight:1}}>×</button>
                   </div>
                 </div>
-                {selectedEntry.flareMode&&<div style={{fontSize:11,background:"#FDF0ED",color:"#9A4535",borderRadius:10,padding:"2px 8px",fontWeight:700,display:"inline-block",marginBottom:8}}>FLARE</div>}
-                {Object.entries(selectedEntry.painScores??{}).filter(([,v])=>v!=null).length>0&&<div style={{display:"flex",gap:10,marginBottom:8,flexWrap:"wrap"}}>{Object.entries(selectedEntry.painScores??{}).filter(([,v])=>v!=null).map(([name,val])=><div key={name} style={{display:"flex",alignItems:"center",gap:5}}><span style={{fontSize:10,color:"#8A87A0"}}>{name}</span><div style={{background:PAIN_COLORS[val-1],color:"white",borderRadius:14,padding:"2px 8px",fontSize:12,fontWeight:700}}>{val}</div></div>)}</div>}
-                {Object.entries(selectedEntry.conditions??{}).filter(([,v])=>v?.severity!=null).length>0&&<div style={{display:"flex",flexWrap:"wrap",gap:6,marginBottom:8}}>{Object.entries(selectedEntry.conditions??{}).filter(([,v])=>v?.severity!=null).map(([name,val])=><span key={name} style={{fontSize:11,background:"#E8EDF5",color:"#2D4A7A",borderRadius:10,padding:"2px 8px",fontWeight:700}}>{name} {val.severity}{val.phase?` · ${val.phase}`:""}</span>)}</div>}
-                {selectedEntry.symptoms?.length>0&&<div style={{display:"flex",flexWrap:"wrap",gap:5,marginBottom:8}}>{selectedEntry.symptoms.map(s=><span key={s} style={{background:"#EDE8F5",color:"#4A3563",borderRadius:12,padding:"2px 9px",fontSize:12}}>{s}</span>)}</div>}
-                {selectedEntry.tags?.length>0&&<div style={{display:"flex",flexWrap:"wrap",gap:5,marginBottom:8}}>{selectedEntry.tags.map(t=><span key={t} style={{background:"#F0F0F0",color:"#5A5870",borderRadius:12,padding:"2px 9px",fontSize:12}}>{t}</span>)}</div>}
-                {selectedEntry.notes&&<div style={{fontSize:13,color:"#5A5870"}}><strong>Notes:</strong> {selectedEntry.notes}</div>}
+                {selectedEntry?.flareMode&&<div style={{fontSize:11,background:"#FDF0ED",color:"#9A4535",borderRadius:10,padding:"2px 8px",fontWeight:700,display:"inline-block",marginBottom:8}}>FLARE</div>}
+                {selectedEntry&&Object.entries(selectedEntry.painScores??{}).filter(([,v])=>v!=null).length>0&&<div style={{display:"flex",gap:10,marginBottom:8,flexWrap:"wrap"}}>{Object.entries(selectedEntry.painScores??{}).filter(([,v])=>v!=null).map(([name,val])=><div key={name} style={{display:"flex",alignItems:"center",gap:5}}><span style={{fontSize:10,color:"#8A87A0"}}>{name}</span><div style={{background:PAIN_COLORS[val-1],color:"white",borderRadius:14,padding:"2px 8px",fontSize:12,fontWeight:700}}>{val}</div></div>)}</div>}
+                {selectedEntry&&Object.entries(selectedEntry.conditions??{}).filter(([,v])=>v?.severity!=null).length>0&&<div style={{display:"flex",flexWrap:"wrap",gap:6,marginBottom:8}}>{Object.entries(selectedEntry.conditions??{}).filter(([,v])=>v?.severity!=null).map(([name,val])=><span key={name} style={{fontSize:11,background:"#E8EDF5",color:"#2D4A7A",borderRadius:10,padding:"2px 8px",fontWeight:700}}>{name} {val.severity}{val.phase?` · ${val.phase}`:""}</span>)}</div>}
+                {selectedEntry?.symptoms?.length>0&&<div style={{display:"flex",flexWrap:"wrap",gap:5,marginBottom:8}}>{selectedEntry.symptoms.map(s=><span key={s} style={{background:"#EDE8F5",color:"#4A3563",borderRadius:12,padding:"2px 9px",fontSize:12}}>{s}</span>)}</div>}
+                {selectedEntry?.tags?.length>0&&<div style={{display:"flex",flexWrap:"wrap",gap:5,marginBottom:8}}>{selectedEntry.tags.map(t=><span key={t} style={{background:"#F0F0F0",color:"#5A5870",borderRadius:12,padding:"2px 9px",fontSize:12}}>{t}</span>)}</div>}
+                {selectedDayMeds.length>0&&<div style={{display:"flex",flexWrap:"wrap",gap:5,marginBottom:8}}>{selectedDayMeds.map(m=><span key={m.id} style={{background:"#E5F3F0",color:"#1F6B5C",borderRadius:12,padding:"2px 9px",fontSize:12}}>💊 {m.name}</span>)}</div>}
+                {selectedEntry?.notes&&<div style={{fontSize:13,color:"#5A5870"}}><strong>Notes:</strong> {selectedEntry.notes}</div>}
+                {!selectedEntry&&selectedDayMeds.length>0&&<div style={{fontSize:12,color:"#B0ADBD",fontStyle:"italic"}}>No daily entry logged this day — medication use only.</div>}
               </div>}
 
               {findTag&&groupedByMonth.length>0&&<div style={card}>
                 <div style={lbl}>All matches</div>
-                {groupedByMonth.map(([month,ents])=><div key={month} style={{marginBottom:14}}>
-                  <div style={{fontSize:12,fontWeight:700,color:"#8A87A0",marginBottom:6}}>{month} <span style={{fontWeight:400,color:"#C0BDCC"}}>({ents.length})</span></div>
+                {groupedByMonth.map(([month,dates])=><div key={month} style={{marginBottom:14}}>
+                  <div style={{fontSize:12,fontWeight:700,color:"#8A87A0",marginBottom:6}}>{month} <span style={{fontWeight:400,color:"#C0BDCC"}}>({dates.length})</span></div>
                   <div style={{display:"flex",flexWrap:"wrap",gap:6}}>
-                    {ents.map(e=><button key={e.date} onClick={()=>{setFindSelectedDate(e.date); const d=new Date(e.date+"T12:00:00"); setFindMonth({y:d.getFullYear(),m:d.getMonth()});}} style={{padding:"6px 12px",borderRadius:16,border:`1.5px solid ${findCol.border}`,background:findSelectedDate===e.date?findCol.text:findCol.bg,color:findSelectedDate===e.date?"white":findCol.text,fontSize:12,fontWeight:600,cursor:"pointer"}}>{fmtDate(e.date)}</button>)}
+                    {dates.map(d=><button key={d} onClick={()=>{setFindSelectedDate(d); const dd=new Date(d+"T12:00:00"); setFindMonth({y:dd.getFullYear(),m:dd.getMonth()});}} style={{padding:"6px 12px",borderRadius:16,border:`1.5px solid ${findCol.border}`,background:findSelectedDate===d?findCol.text:findCol.bg,color:findSelectedDate===d?"white":findCol.text,fontSize:12,fontWeight:600,cursor:"pointer"}}>{fmtDate(d)}</button>)}
                   </div>
                 </div>)}
               </div>}
 
-              {findTag&&matchingEntries.length===0&&<div style={{textAlign:"center",padding:"40px 0",color:"#8A87A0"}}><div style={{fontSize:13}}>No entries logged with this tag yet</div></div>}
+              {findTag&&matchingDates.length===0&&<div style={{textAlign:"center",padding:"40px 0",color:"#8A87A0"}}><div style={{fontSize:13}}>No entries logged with this tag yet</div></div>}
             </div>}
 
             {tab==="tags"&&<div>
@@ -631,7 +853,7 @@
               <div style={card}>
                 <div style={lbl}>Add a tag</div>
                 <select value={newTagCat} onChange={e=>setNewTagCat(e.target.value)} style={{width:"100%",padding:"10px 12px",marginBottom:10,border:"1.5px solid #E2DFF0",borderRadius:8,fontSize:14,fontFamily:"inherit",color:"#1F1F2E",background:"white",outline:"none"}}>
-                  {allCats.filter(c=>c!=="Conditions").map(c=><option key={c} value={c}>{c}</option>)}
+                  {allCats.filter(c=>c!=="Conditions").map(c=><option key={c} value={c}>{catLabel(c)}</option>)}
                 </select>
                 <div style={{display:"flex",gap:8}}>
                   <input value={newTagName} onChange={e=>setNewTagName(e.target.value)} onKeyDown={e=>e.key==="Enter"&&addTag()} placeholder="Tag name…" style={inp}/>
@@ -640,7 +862,7 @@
               </div>
 
               {allCats.filter(c=>c!=="Conditions").map(cat=><div key={cat} style={card}>
-                <div style={lbl}>{cat}</div>
+                <div style={lbl}>{catLabel(cat)}</div>
                 {(tags[cat]??[]).length===0?<div style={{fontSize:13,color:"#C0BDCC",fontStyle:"italic"}}>No tags yet</div>:(tags[cat]??[]).map(def=>{const name=typeof def==="string"?def:def.name; return <div key={name} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"8px 0",borderBottom:"1px solid #F4F2F7"}}><span style={{fontSize:14}}>{name}</span><button onClick={()=>delTag(cat,name)} style={{background:"none",border:"none",color:"#C0BDCC",cursor:"pointer",fontSize:20,padding:"0 4px",lineHeight:1}}>×</button></div>;})}
               </div>)}
             </div>}
@@ -651,6 +873,22 @@
                 <div style={{fontSize:22,fontWeight:700,color:"#4A3563",marginBottom:4}}>{entries.length} entries</div>
                 {entries.length>0&&<div style={{fontSize:13,color:"#8A87A0"}}>{fmtDate(entries[entries.length-1].date)} → {fmtDate(entries[0].date)}</div>}
               </div>
+
+              {kcalEntries.length>0&&<div style={card}>
+                <div style={lbl}>Calories</div>
+                <div style={{display:"flex",gap:20,marginBottom:10}}>
+                  <div>
+                    <div style={{fontSize:22,fontWeight:700,color:"#4A3563"}}>{avgKcalLogged.toLocaleString()}</div>
+                    <div style={{fontSize:11,color:"#8A87A0",marginTop:2}}>avg on days logged ({kcalEntries.length} of {entries.length})</div>
+                  </div>
+                  <div>
+                    <div style={{fontSize:22,fontWeight:700,color:"#4A3563"}}>{last7Total.toLocaleString()}</div>
+                    <div style={{fontSize:11,color:"#8A87A0",marginTop:2}}>last 7 days total ({last7Count} of 7 logged)</div>
+                  </div>
+                </div>
+                <div style={{fontSize:11,color:"#B0ADBD",fontStyle:"italic"}}>Estimates only include days with a kcal figure — gaps aren't counted as zero.</div>
+              </div>}
+
               <div style={card}>
                 <div style={lbl}>CSV includes</div>
                 {["Date",...painScalesDef.map(s=>s.name+" (1–10)"),"Symptoms","Condition severities & phases","Food notes","Meals + kcal","Notes","Flare data"].map(item=><div key={item} style={{fontSize:14,color:"#5A5870",padding:"6px 0",borderBottom:"1px solid #F4F2F7",display:"flex",gap:10}}><span style={{color:"#7AAF8E",fontWeight:700}}>✓</span> {item}</div>)}
@@ -662,6 +900,90 @@
                 <div style={{fontSize:12,fontWeight:700,color:"#7A3B2A",marginBottom:6,textTransform:"uppercase",letterSpacing:"0.06em"}}>⚠ Back up regularly</div>
                 <div style={{fontSize:13,color:"#7A3B2A"}}>Your data lives only on this device. Export a CSV periodically so you don't lose it if you clear your browser data.</div>
               </div>
+            </div>}
+
+            {tab==="meds"&&<div>
+              <div style={card}>
+                <div style={lbl}>Active medications</div>
+                {activeMeds.length===0&&<div style={{fontSize:13,color:"#B0ADBD",fontStyle:"italic"}}>No medications added yet</div>}
+                {activeMeds.map(m=>{
+                  const isOpen=openMedEdit[m.id];
+                  const scheduleLabel=m.schedule==="daily"?"Daily":m.schedule==="weekly"?"Weekly":m.schedule==="interval"?`Every ${m.intervalDays||"?"} days`:"As needed";
+                  const lastTaken=lastTakenFor(m.id);
+                  const nextExpected=(m.schedule==="interval"&&lastTaken&&m.intervalDays)?(()=>{const d=new Date(lastTaken+"T12:00:00");d.setDate(d.getDate()+m.intervalDays);return d.toLocaleDateString("en-CA");})():null;
+                  const actionDate=getMedActionDate(m.id);
+                  const hist=historyFor(m.id);
+                  return <div key={m.id} style={{borderBottom:"1px solid #F4F2F7",paddingBottom:12,marginBottom:12}}>
+                    <button onClick={()=>toggleMedEdit(m.id)} style={{background:"none",border:"none",cursor:"pointer",padding:0,display:"flex",alignItems:"center",gap:8,flexWrap:"wrap",textAlign:"left",width:"100%"}}>
+                      <span style={{fontSize:14,fontWeight:600,color:"#1F1F2E"}}>{m.name}</span>
+                      {m.dose&&<span style={{fontSize:12,color:"#8A87A0"}}>{m.dose}</span>}
+                      <span style={{fontSize:11,color:"#1F6B5C",background:"#E5F3F0",padding:"1px 7px",borderRadius:8}}>{scheduleLabel}</span>
+                      <span style={{fontSize:9,color:"#8A87A0",marginLeft:"auto"}}>{isOpen?"▲":"▼"}</span>
+                    </button>
+                    {m.schedule==="interval"&&<div style={{fontSize:12,color:"#8A87A0",marginTop:6}}>{lastTaken?`Last dose: ${fmtDate(lastTaken)}`:"No doses logged yet"}{nextExpected&&` · Next expected: ${fmtDate(nextExpected)}`}</div>}
+                    {m.schedule==="as-needed"&&<div style={{fontSize:12,color:"#8A87A0",marginTop:6}}>{takenCount30For(m.id)} times in last 30 days</div>}
+
+                    {isOpen&&<div style={{background:"#F4F6FA",borderRadius:10,padding:14,marginTop:10}}>
+                      {m.schedule==="interval"&&<div style={{marginBottom:14}}>
+                        <div style={{fontSize:12,fontWeight:700,color:"#5A70A0",marginBottom:6,textTransform:"uppercase",letterSpacing:"0.06em"}}>Log a dose</div>
+                        <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+                          <input type="date" value={actionDate} max={todayStr()} onChange={e=>setMedActionDate(p=>({...p,[m.id]:e.target.value}))} style={{...inp,fontSize:13,padding:"8px 10px",flex:"1 1 140px"}}/>
+                          <button onClick={()=>toggleTaken(m.id,actionDate)} style={{padding:"8px 14px",background:headerBg,color:"white",border:"none",borderRadius:8,fontSize:13,fontWeight:600,cursor:"pointer",whiteSpace:"nowrap"}}>
+                            {medChanges.some(c=>c.medId===m.id&&c.date===actionDate&&c.type==="taken")?"✓ Logged — tap to undo":"Log dose"}
+                          </button>
+                        </div>
+                      </div>}
+
+                      <div style={{marginBottom:14}}>
+                        <div style={{fontSize:12,fontWeight:700,color:"#5A70A0",marginBottom:6,textTransform:"uppercase",letterSpacing:"0.06em"}}>Change dose</div>
+                        <div style={{display:"flex",gap:8,flexWrap:"wrap"}}>
+                          <input value={medDoseInput[m.id]??""} onChange={e=>setMedDoseInput(p=>({...p,[m.id]:e.target.value}))} placeholder="New dose…" style={{...inp,fontSize:13,padding:"8px 10px",flex:"1 1 100px"}}/>
+                          <input type="date" value={actionDate} max={todayStr()} onChange={e=>setMedActionDate(p=>({...p,[m.id]:e.target.value}))} style={{...inp,fontSize:13,padding:"8px 10px",flex:"0 0 140px"}}/>
+                          <button onClick={()=>{changeDose(m.id,medDoseInput[m.id]||"",actionDate); setMedDoseInput(p=>({...p,[m.id]:""}));}} style={{padding:"8px 14px",background:"white",border:"1.5px solid #E2DFF0",borderRadius:8,fontSize:13,fontWeight:600,cursor:"pointer",color:"#4A3563",whiteSpace:"nowrap"}}>Update</button>
+                        </div>
+                      </div>
+
+                      <div style={{marginBottom:hist.length>0?14:0}}>
+                        <button onClick={()=>stopMedication(m.id,actionDate)} style={{padding:"8px 14px",background:"none",border:"1px solid #E2DFF0",borderRadius:8,fontSize:13,color:"#9A4535",cursor:"pointer"}}>Stop this medication (as of {fmtDate(actionDate)})</button>
+                      </div>
+
+                      {hist.length>0&&<div>
+                        <div style={{fontSize:12,fontWeight:700,color:"#5A70A0",marginBottom:6,textTransform:"uppercase",letterSpacing:"0.06em"}}>History</div>
+                        {hist.map(c=><div key={c.id} style={{fontSize:12,color:"#5A5870",padding:"3px 0"}}>{fmtDate(c.date)} — {c.type==="started"?`Started${c.dose?` at ${c.dose}`:""}`:c.type==="dose_changed"?`Dose changed to ${c.dose}`:"Stopped"}</div>)}
+                      </div>}
+                    </div>}
+                  </div>;
+                })}
+              </div>
+
+              <div style={card}>
+                {!showAddMed
+                  ?<button onClick={()=>setShowAddMed(true)} style={{width:"100%",padding:"10px",background:"white",color:"#4A3563",border:"1.5px dashed #C4B8E0",borderRadius:10,fontSize:13,fontWeight:600,cursor:"pointer",display:"flex",alignItems:"center",justifyContent:"center",gap:6}}><span style={{fontSize:16,lineHeight:1}}>+</span> Add a medication</button>
+                  :<div>
+                    <div style={lbl}>Add medication</div>
+                    <input value={newMedName} onChange={e=>setNewMedName(e.target.value)} placeholder="Medication name" style={{...inp,marginBottom:8,width:"100%",boxSizing:"border-box"}}/>
+                    <input value={newMedDose} onChange={e=>setNewMedDose(e.target.value)} placeholder="Dose (e.g. 40mg)" style={{...inp,marginBottom:8,width:"100%",boxSizing:"border-box"}}/>
+                    <div style={{display:"flex",gap:6,flexWrap:"wrap",marginBottom:8}}>
+                      {[["daily","Daily"],["weekly","Weekly"],["interval","Every N days"],["as-needed","As needed"]].map(([id,label])=><button key={id} onClick={()=>setNewMedSchedule(id)} style={{padding:"6px 13px",borderRadius:20,border:`1.5px solid ${newMedSchedule===id?"#4A3563":"#E2DFF0"}`,background:newMedSchedule===id?"#4A3563":"white",color:newMedSchedule===id?"white":"#8A87A0",fontWeight:newMedSchedule===id?700:400,fontSize:12,cursor:"pointer"}}>{label}</button>)}
+                    </div>
+                    {newMedSchedule==="interval"&&<input type="number" min={1} value={newMedInterval} onChange={e=>setNewMedInterval(e.target.value)} placeholder="Interval in days (e.g. 42 for 6 weeks)" style={{...inp,marginBottom:8,width:"100%",boxSizing:"border-box"}}/>}
+                    <div style={{display:"flex",gap:8}}>
+                      <button onClick={addMedication} style={{flex:1,padding:"10px",background:headerBg,color:"white",border:"none",borderRadius:8,fontSize:13,fontWeight:600,cursor:"pointer"}}>Add</button>
+                      <button onClick={()=>{setShowAddMed(false);setNewMedName("");setNewMedDose("");setNewMedSchedule("daily");setNewMedInterval("");}} style={{padding:"10px 16px",background:"white",border:"1.5px solid #E2DFF0",borderRadius:8,fontSize:13,color:"#8A87A0",cursor:"pointer"}}>Cancel</button>
+                    </div>
+                  </div>}
+              </div>
+
+              {inactiveMeds.length>0&&<div style={card}>
+                <div style={lbl}>Stopped medications</div>
+                {inactiveMeds.map(m=><div key={m.id} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"8px 0",borderBottom:"1px solid #F4F2F7"}}>
+                  <div><span style={{fontSize:14,color:"#5A5870"}}>{m.name}</span>{m.dose&&<span style={{fontSize:12,color:"#B0ADBD",marginLeft:6}}>{m.dose}</span>}</div>
+                  <div style={{display:"flex",gap:8}}>
+                    <button onClick={()=>restartMedication(m.id,todayStr())} style={{background:"none",border:"1px solid #E2DFF0",color:"#4A3563",cursor:"pointer",fontSize:12,padding:"3px 10px",borderRadius:8}}>Restart</button>
+                    <button onClick={()=>deleteMedication(m.id)} style={{background:"none",border:"1px solid #E2DFF0",color:"#C0BDCC",cursor:"pointer",fontSize:12,padding:"3px 10px",borderRadius:8}}>Delete</button>
+                  </div>
+                </div>)}
+              </div>}
             </div>}
 
           </div>
