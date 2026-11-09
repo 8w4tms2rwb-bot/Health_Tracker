@@ -31,7 +31,7 @@
     };
   </script>
   <script type="text/babel">
-    const { useState, useEffect } = React;
+    const { useState, useEffect, useRef } = React;
 
     const LS = {
       get: (key) => { try { return localStorage.getItem(key); } catch { return null; } },
@@ -44,6 +44,8 @@
     const PAIN_SCALES_KEY = "hl:painScales";
     const MEDS_KEY        = "hl:medications";
     const MED_CHANGES_KEY = "hl:medChanges";
+    const LAST_EXPORT_KEY = "hl:lastExportAt";
+    const EXPORT_SNOOZE_KEY = "hl:exportSnoozeUntil";
     const uid = () => Date.now().toString(36)+Math.random().toString(36).slice(2,8);
 
     const migrateData = (loadedTags, loadedEntries) => {
@@ -226,8 +228,10 @@
     const todayStr   = () => new Date().toLocaleDateString("en-CA");
     const fmtDate    = (d) => new Date(d+"T12:00:00").toLocaleDateString("en-GB",{weekday:"short",day:"numeric",month:"short"});
     const emptyFlare = () => ({stoolCount:0,consistency:"",blood:"none",nocturnal:false});
-    const newMeal    = () => ({id:Date.now().toString(),description:"",kcal:""});
+    const newMeal    = () => ({id:Date.now().toString(),description:"",kcal:"",protein:"",fiber:""});
     const totalKcal  = (meals) => { const s=(meals||[]).reduce((a,m)=>a+(parseInt(m.kcal)||0),0); return s>0?s:null; };
+    const totalNut   = (meals,field) => { const s=(meals||[]).reduce((a,m)=>a+(parseFloat(m[field])||0),0); return s>0?Math.round(s*10)/10:null; };
+    const nutSummary = (meals) => [totalKcal(meals)!=null&&`~${totalKcal(meals).toLocaleString()} kcal`, totalNut(meals,"protein")!=null&&`${totalNut(meals,"protein")} g protein`, totalNut(meals,"fiber")!=null&&`${totalNut(meals,"fiber")} g fiber`].filter(Boolean);
 
     function OptBtn({value, current, onSelect, color}) {
       return (
@@ -286,6 +290,9 @@
       const [findMonth,        setFindMonth]        = useState(()=>{const d=new Date();return {y:d.getFullYear(),m:d.getMonth()};});
       const [findSelectedDate, setFindSelectedDate] = useState(null);
       const [openTagSection,   setOpenTagSection]   = useState({});
+      const [showExportReminder, setShowExportReminder] = useState(false);
+      const [dragInfo, setDragInfo] = useState(null);
+      const dragRefs = useRef({});
 
       useEffect(() => {
         const e=LS.get(ENTRIES_KEY); let loadedEntries=[]; if(e) try{loadedEntries=JSON.parse(e);}catch{}
@@ -297,6 +304,11 @@
         const p=LS.get(PAIN_SCALES_KEY); if(p) try{setPainScalesDef(JSON.parse(p));}catch{}
         const md=LS.get(MEDS_KEY);        if(md) try{setMedications(JSON.parse(md));}catch{}
         const mc=LS.get(MED_CHANGES_KEY); if(mc) try{setMedChanges(JSON.parse(mc));}catch{}
+        const lastExport=LS.get(LAST_EXPORT_KEY), snoozeUntil=LS.get(EXPORT_SNOOZE_KEY), nowMs0=Date.now();
+        const daysSinceExport=lastExport?(nowMs0-new Date(lastExport).getTime())/86400000:Infinity;
+        const isSnoozed=snoozeUntil&&new Date(snoozeUntil).getTime()>nowMs0;
+        if(migEntries.length>0&&daysSinceExport>=7&&!isSnoozed) setShowExportReminder(true);
+
         setLoaded(true);
       }, []);
 
@@ -405,21 +417,52 @@
       const toggleCondEdit    = (n) => setOpenCondEdit(p=>({...p,[n]:!p[n]}));
       const addQuickSymptom   = (cn,sym) => { const s=(sym||"").trim(); if(!s) return; const next=(tags.Conditions??[]).map(c=>c.name===cn&&!(c.quickSymptoms??[]).includes(s)?{...c,quickSymptoms:[...(c.quickSymptoms??[]),s]}:c); saveTags({...tags,Conditions:next}); setCondSymInputs(p=>({...p,[cn]:""})); };
       const removeQuickSymptom= (cn,sym) => { const next=(tags.Conditions??[]).map(c=>c.name===cn?{...c,quickSymptoms:(c.quickSymptoms??[]).filter(s=>s!==sym)}:c); saveTags({...tags,Conditions:next}); };
+      const moveTagInCat = (cat,fromIndex,toIndex) => {
+        const list=[...(tags[cat]??[])];
+        const [item]=list.splice(fromIndex,1);
+        list.splice(toIndex,0,item);
+        saveTags({...tags,[cat]:list});
+      };
+      const handleDragPointerDown = (e,cat,idx) => { e.currentTarget.setPointerCapture(e.pointerId); setDragInfo({cat,fromIndex:idx,overIndex:idx}); };
+      const handleDragPointerMove = (e,cat) => {
+        setDragInfo(prev=>{
+          if(!prev||prev.cat!==cat) return prev;
+          const list=tags[cat]??[]; let newOver=list.length-1;
+          for(let i=0;i<list.length;i++){
+            const el=dragRefs.current[`${cat}::${i}`]; if(!el) continue;
+            const r=el.getBoundingClientRect();
+            if(e.clientY<r.top+r.height/2){ newOver=i; break; }
+          }
+          return {...prev,overIndex:newOver};
+        });
+      };
+      const handleDragPointerUp = () => {
+        const prev=dragInfo;
+        if(prev&&prev.fromIndex!==prev.overIndex) moveTagInCat(prev.cat,prev.fromIndex,prev.overIndex);
+        setDragInfo(null);
+      };
 
       const exportCSV = () => {
         const cd=(tags.Conditions??[]).filter(d=>d.type==="condition");
         const sh=painScalesDef.map(s=>s.name), ch=cd.flatMap(c=>[`${c.name} Severity`,`${c.name} Phase`]);
-        const rows=[["Date",...sh,"Symptoms",...ch,"Food Notes","Meals","Est. kcal","Notes","Flare Mode","Stools","Consistency","Blood","Nocturnal"],
+        const rows=[["Date",...sh,"Symptoms",...ch,"Food Notes","Meals","Est. kcal","Est. protein (g)","Est. fiber (g)","Notes","Flare Mode","Stools","Consistency","Blood","Nocturnal"],
           ...entries.map(e=>{
             const sc=painScalesDef.map(s=>(e.painScores??{})[s.name]??"");
             const cc=cd.flatMap(c=>[(e.conditions??{})[c.name]?.severity??"",(e.conditions??{})[c.name]?.phase??""]);
-            const ms=(e.meals??[]).map(m=>`${m.description}${m.kcal?" (~"+m.kcal+" kcal)":""}`).join(" | ");
+            const ms=(e.meals??[]).map(m=>`${m.description}${m.kcal?" (~"+m.kcal+" kcal)":""}${m.protein?" ("+m.protein+" g protein)":""}${m.fiber?" ("+m.fiber+" g fiber)":""}`).join(" | ");
             const k=totalKcal(e.meals??[]);
-            return [e.date,...sc,`"${(e.symptoms??[]).join(", ")}"`, ...cc,`"${(e.tags??[]).join(", ")}"`,`"${ms.replace(/"/g,'""')}"`,k??"",`"${(e.notes??"").replace(/"/g,'""')}"`,e.flareMode?"yes":"no",e.flareData?.stoolCount??"",e.flareData?.consistency??"",e.flareData?.blood??"",e.flareData?.nocturnal?"yes":""];
+            return [e.date,...sc,`"${(e.symptoms??[]).join(", ")}"`, ...cc,`"${(e.tags??[]).join(", ")}"`,`"${ms.replace(/"/g,'""')}"`,k??"",totalNut(e.meals??[],"protein")??"",totalNut(e.meals??[],"fiber")??"",`"${(e.notes??"").replace(/"/g,'""')}"`,e.flareMode?"yes":"no",e.flareData?.stoolCount??"",e.flareData?.consistency??"",e.flareData?.blood??"",e.flareData?.nocturnal?"yes":""];
           })];
         const a=document.createElement("a");
         a.href=URL.createObjectURL(new Blob([rows.map(r=>r.join(",")).join("\n")],{type:"text/csv"}));
         a.download=`health-log-${todayStr()}.csv`; a.click();
+        LS.set(LAST_EXPORT_KEY, new Date().toISOString());
+        setShowExportReminder(false);
+      };
+      const snoozeExportReminder = () => {
+        const d=new Date(); d.setDate(d.getDate()+7);
+        LS.set(EXPORT_SNOOZE_KEY, d.toISOString());
+        setShowExportReminder(false);
       };
 
       const card={background:"white",borderRadius:12,padding:20,marginBottom:14,boxShadow:"0 1px 4px rgba(0,0,0,0.07)"};
@@ -568,13 +611,16 @@
       };
       const hasPeriodData=periodStreaks.length>0;
 
-      const kcalEntries=entries.map(e=>({date:e.date,kcal:totalKcal(e.meals)})).filter(e=>e.kcal!=null);
-      const avgKcalLogged=kcalEntries.length?Math.round(kcalEntries.reduce((a,b)=>a+b.kcal,0)/kcalEntries.length):null;
       const last7StartD=new Date(); last7StartD.setDate(last7StartD.getDate()-6);
       const last7StartStr=last7StartD.toLocaleDateString("en-CA");
-      const last7Kcal=kcalEntries.filter(e=>e.date>=last7StartStr&&e.date<=todayStr());
-      const last7Total=last7Kcal.reduce((a,b)=>a+b.kcal,0);
-      const last7Count=last7Kcal.length;
+      const nutStats=(field)=>{
+        const rows=entries.map(e=>({date:e.date,v:field==="kcal"?totalKcal(e.meals):totalNut(e.meals,field)})).filter(r=>r.v!=null);
+        const recent=rows.filter(r=>r.date>=last7StartStr&&r.date<=todayStr());
+        const avgRaw=rows.length?rows.reduce((a,b)=>a+b.v,0)/rows.length:null;
+        return {n:rows.length,avg:avgRaw==null?null:(field==="kcal"?Math.round(avgRaw):Math.round(avgRaw*10)/10),
+          last7Total:Math.round(recent.reduce((a,b)=>a+b.v,0)*10)/10,last7Count:recent.length};
+      };
+      const nutRows=[["Calories","kcal",nutStats("kcal")],["Protein","g",nutStats("protein")],["Fiber","g",nutStats("fiber")]].filter(r=>r[2].n>0);
       const cycleLegendText=haveCycleHistory
         ?`Anticipated (avg of last ${recentCycleLengths.length} cycle${recentCycleLengths.length>1?"s":""}, ~${CYCLE_LEN}-day cycle)`
         :"Anticipated (not enough cycles logged yet — assuming 25 days)";
@@ -626,12 +672,20 @@
               </div>
               <button onClick={toggleFlare} style={{marginTop:4,padding:"6px 14px",borderRadius:20,border:`1.5px solid ${isFlareMode?"#FF9980":"rgba(255,255,255,0.35)"}`,background:isFlareMode?"rgba(255,100,70,0.25)":"transparent",color:isFlareMode?"#FF9980":"rgba(255,255,255,0.6)",fontSize:11,fontWeight:700,cursor:"pointer",letterSpacing:"0.05em",textTransform:"uppercase"}}>{isFlareMode?"⚠ Flare ON":"Flare mode"}</button>
             </div>
-            <div style={{display:"flex",gap:2}}>
+            <div style={{display:"flex",gap:2,overflowX:"auto",WebkitOverflowScrolling:"touch",scrollbarWidth:"none"}}>
               {[["log","Today"],["history","History"],["find","Find"],["tags","Tags"],["export","Export"],["meds","Meds"]].map(([id,label])=>(
-                <button key={id} onClick={()=>setTab(id)} style={{padding:"8px 16px",background:tab===id?"white":"transparent",color:tab===id?headerBg:"rgba(255,255,255,0.6)",border:"none",borderRadius:"8px 8px 0 0",cursor:"pointer",fontSize:14,fontWeight:tab===id?700:400,transition:"all 0.15s"}}>{label}</button>
+                <button key={id} onClick={()=>setTab(id)} style={{padding:"8px 8px",flex:"1 1 auto",flexShrink:0,whiteSpace:"nowrap",background:tab===id?"white":"transparent",color:tab===id?headerBg:"rgba(255,255,255,0.6)",border:"none",borderRadius:"8px 8px 0 0",cursor:"pointer",fontSize:13,fontWeight:tab===id?700:400,transition:"all 0.15s"}}>{label}</button>
               ))}
             </div>
           </div>
+
+          {showExportReminder&&<div style={{background:"#FBF3D9",borderBottom:"1px solid #E8D190",padding:"10px 20px",display:"flex",justifyContent:"space-between",alignItems:"center",gap:10,flexWrap:"wrap"}}>
+            <span style={{fontSize:13,color:"#8A6D1F"}}>📦 It's been a week — back up your data?</span>
+            <div style={{display:"flex",gap:8}}>
+              <button onClick={exportCSV} style={{padding:"5px 12px",background:"#8A6D1F",color:"white",border:"none",borderRadius:8,fontSize:12,fontWeight:600,cursor:"pointer"}}>Export now</button>
+              <button onClick={snoozeExportReminder} style={{padding:"5px 12px",background:"none",border:"1px solid #E8D190",color:"#8A6D1F",borderRadius:8,fontSize:12,cursor:"pointer"}}>Remind me later</button>
+            </div>
+          </div>}
 
           <div style={{padding:"20px",maxWidth:640,margin:"0 auto"}}>
 
@@ -686,7 +740,7 @@
               <div style={card}>
                 <div style={{display:"flex",justifyContent:"space-between",alignItems:"center",marginBottom:12}}>
                   <div style={lbl}>Meals</div>
-                  {totalKcal(meals)&&<div style={{fontSize:12,color:"#8A87A0",fontWeight:600}}>~{totalKcal(meals).toLocaleString()} kcal total</div>}
+                  {nutSummary(meals).length>0&&<div style={{fontSize:12,color:"#8A87A0",fontWeight:600,textAlign:"right"}}>{nutSummary(meals).join(" · ")} total</div>}
                 </div>
                 {meals.length===0&&<div style={{fontSize:13,color:"#B0ADBD",fontStyle:"italic",marginBottom:12}}>No meals logged yet</div>}
                 {meals.map((meal)=>(
@@ -694,11 +748,16 @@
                     <div style={{display:"flex",justifyContent:"flex-end",marginBottom:6}}><button onClick={()=>removeMeal(meal.id)} style={{background:"none",border:"none",color:"#C0BDCC",cursor:"pointer",fontSize:18,padding:"0 2px",lineHeight:1}}>×</button></div>
                     <textarea value={meal.description} onChange={e=>updateMeal(meal.id,"description",e.target.value)} placeholder="What did you eat?" rows={2}
                       style={{width:"100%",boxSizing:"border-box",border:"1.5px solid #E2DFF0",borderRadius:8,padding:"8px 10px",fontSize:13,fontFamily:"inherit",resize:"vertical",color:"#1F1F2E",outline:"none",lineHeight:1.5,background:"white"}}/>
-                    <div style={{display:"flex",alignItems:"center",gap:6,marginTop:8}}>
-                      <span style={{fontSize:12,color:"#B0ADBD"}}>~</span>
-                      <input type="number" value={meal.kcal} onChange={e=>updateMeal(meal.id,"kcal",e.target.value)} placeholder="kcal estimate" min={0}
-                        style={{width:110,padding:"5px 8px",border:"1.5px solid #E2DFF0",borderRadius:8,fontSize:12,fontFamily:"inherit",color:"#1F1F2E",outline:"none"}}/>
-                      <span style={{fontSize:12,color:"#B0ADBD"}}>kcal (optional)</span>
+                    <div style={{display:"flex",alignItems:"center",gap:8,marginTop:8,flexWrap:"wrap"}}>
+                      {[["kcal","kcal","~"],["protein","g protein",""],["fiber","g fiber",""]].map(([field,unit,prefix])=>(
+                        <div key={field} style={{display:"flex",alignItems:"center",gap:4}}>
+                          {prefix&&<span style={{fontSize:12,color:"#B0ADBD"}}>{prefix}</span>}
+                          <input type="number" inputMode="decimal" value={meal[field]??""} onChange={e=>updateMeal(meal.id,field,e.target.value)} placeholder="—" min={0}
+                            style={{width:60,padding:"5px 8px",border:"1.5px solid #E2DFF0",borderRadius:8,fontSize:12,fontFamily:"inherit",color:"#1F1F2E",outline:"none"}}/>
+                          <span style={{fontSize:12,color:"#B0ADBD"}}>{unit}</span>
+                        </div>
+                      ))}
+                      <span style={{fontSize:11,color:"#C0BDCC"}}>(all optional)</span>
                     </div>
                   </div>
                 ))}
@@ -740,7 +799,7 @@
                     </div>
                     {e.flareMode&&e.flareData&&<div style={{background:"#FDF0ED",borderRadius:8,padding:"8px 12px",marginBottom:8,fontSize:13,color:"#7A3020",display:"flex",gap:12,flexWrap:"wrap"}}>{e.flareData.stoolCount>0&&<span>💩 {e.flareData.stoolCount}</span>}{e.flareData.consistency&&<span>{e.flareData.consistency}</span>}{e.flareData.blood&&e.flareData.blood!=="none"&&<span>blood: {e.flareData.blood}</span>}{e.flareData.nocturnal&&<span>nocturnal</span>}</div>}
                     {e.symptoms?.length>0&&<div style={{display:"flex",flexWrap:"wrap",gap:5,marginBottom:8}}>{e.symptoms.map(s=><span key={s} style={{background:"#EDE8F5",color:"#4A3563",borderRadius:12,padding:"2px 9px",fontSize:12}}>{s}</span>)}</div>}
-                    {e.meals?.length>0&&<div style={{marginBottom:8}}>{e.meals.map(m=><div key={m.id} style={{fontSize:13,color:"#5A5870",padding:"2px 0",display:"flex",gap:6,alignItems:"baseline"}}><span style={{flex:1}}>{m.description}</span>{m.kcal&&<span style={{fontSize:11,color:"#8A87A0",flexShrink:0}}>~{m.kcal} kcal</span>}</div>)}{kc&&<div style={{fontSize:11,color:"#8A87A0",marginTop:2,fontWeight:600}}>~{kc.toLocaleString()} kcal estimated</div>}</div>}
+                    {e.meals?.length>0&&<div style={{marginBottom:8}}>{e.meals.map(m=><div key={m.id} style={{fontSize:13,color:"#5A5870",padding:"2px 0",display:"flex",gap:6,alignItems:"baseline"}}><span style={{flex:1}}>{m.description}</span>{nutSummary([m]).length>0&&<span style={{fontSize:11,color:"#8A87A0",flexShrink:0}}>{nutSummary([m]).join(" · ")}</span>}</div>)}{nutSummary(e.meals).length>0&&<div style={{fontSize:11,color:"#8A87A0",marginTop:2,fontWeight:600}}>{nutSummary(e.meals).join(" · ")} estimated</div>}</div>}
                     {e.tags?.length>0&&<div style={{display:"flex",flexWrap:"wrap",gap:5,marginBottom:8}}>{e.tags.map(t=><span key={t} style={{background:"#F0F0F0",color:"#5A5870",borderRadius:12,padding:"2px 9px",fontSize:12}}>{t}</span>)}</div>}
                     {e.notes&&<div style={{fontSize:13,color:"#5A5870"}}><strong>Notes:</strong> {e.notes}</div>}
                   </div>;
@@ -863,7 +922,18 @@
 
               {allCats.filter(c=>c!=="Conditions").map(cat=><div key={cat} style={card}>
                 <div style={lbl}>{catLabel(cat)}</div>
-                {(tags[cat]??[]).length===0?<div style={{fontSize:13,color:"#C0BDCC",fontStyle:"italic"}}>No tags yet</div>:(tags[cat]??[]).map(def=>{const name=typeof def==="string"?def:def.name; return <div key={name} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"8px 0",borderBottom:"1px solid #F4F2F7"}}><span style={{fontSize:14}}>{name}</span><button onClick={()=>delTag(cat,name)} style={{background:"none",border:"none",color:"#C0BDCC",cursor:"pointer",fontSize:20,padding:"0 4px",lineHeight:1}}>×</button></div>;})}
+                {(tags[cat]??[]).length===0?<div style={{fontSize:13,color:"#C0BDCC",fontStyle:"italic"}}>No tags yet</div>:(tags[cat]??[]).map((def,idx)=>{
+                  const name=typeof def==="string"?def:def.name;
+                  const isDragging=dragInfo?.cat===cat&&dragInfo.fromIndex===idx;
+                  const isOver=dragInfo?.cat===cat&&dragInfo.overIndex===idx&&dragInfo.fromIndex!==idx;
+                  return <div key={name} ref={el=>{dragRefs.current[`${cat}::${idx}`]=el;}} style={{display:"flex",justifyContent:"space-between",alignItems:"center",padding:"8px 0",borderBottom:"1px solid #F4F2F7",borderTop:isOver?"2px solid #4A3563":"2px solid transparent",background:isDragging?"#F4F2F7":"transparent",opacity:isDragging?0.5:1}}>
+                    <div style={{display:"flex",alignItems:"center",gap:8}}>
+                      <span onPointerDown={e=>handleDragPointerDown(e,cat,idx)} onPointerMove={e=>handleDragPointerMove(e,cat)} onPointerUp={handleDragPointerUp} onPointerCancel={()=>setDragInfo(null)} style={{cursor:"grab",touchAction:"none",color:"#C0BDCC",fontSize:18,padding:"4px 8px",userSelect:"none",WebkitUserSelect:"none"}}>⠿</span>
+                      <span style={{fontSize:14}}>{name}</span>
+                    </div>
+                    <button onClick={()=>delTag(cat,name)} style={{background:"none",border:"none",color:"#C0BDCC",cursor:"pointer",fontSize:20,padding:"0 4px",lineHeight:1}}>×</button>
+                  </div>;
+                })}
               </div>)}
             </div>}
 
@@ -874,24 +944,29 @@
                 {entries.length>0&&<div style={{fontSize:13,color:"#8A87A0"}}>{fmtDate(entries[entries.length-1].date)} → {fmtDate(entries[0].date)}</div>}
               </div>
 
-              {kcalEntries.length>0&&<div style={card}>
-                <div style={lbl}>Calories</div>
-                <div style={{display:"flex",gap:20,marginBottom:10}}>
-                  <div>
-                    <div style={{fontSize:22,fontWeight:700,color:"#4A3563"}}>{avgKcalLogged.toLocaleString()}</div>
-                    <div style={{fontSize:11,color:"#8A87A0",marginTop:2}}>avg on days logged ({kcalEntries.length} of {entries.length})</div>
+              {nutRows.length>0&&<div style={card}>
+                <div style={lbl}>Nutrition</div>
+                {nutRows.map(([label,unit,st])=>(
+                  <div key={label} style={{marginBottom:14}}>
+                    <div style={{fontSize:12,fontWeight:700,color:"#8A87A0",marginBottom:4}}>{label}</div>
+                    <div style={{display:"flex",gap:20}}>
+                      <div>
+                        <div style={{fontSize:22,fontWeight:700,color:"#4A3563"}}>{st.avg.toLocaleString()}<span style={{fontSize:12,fontWeight:400,color:"#8A87A0"}}> {unit}</span></div>
+                        <div style={{fontSize:11,color:"#8A87A0",marginTop:2}}>avg on days logged ({st.n} of {entries.length})</div>
+                      </div>
+                      <div>
+                        <div style={{fontSize:22,fontWeight:700,color:"#4A3563"}}>{st.last7Total.toLocaleString()}<span style={{fontSize:12,fontWeight:400,color:"#8A87A0"}}> {unit}</span></div>
+                        <div style={{fontSize:11,color:"#8A87A0",marginTop:2}}>last 7 days total ({st.last7Count} of 7 logged)</div>
+                      </div>
+                    </div>
                   </div>
-                  <div>
-                    <div style={{fontSize:22,fontWeight:700,color:"#4A3563"}}>{last7Total.toLocaleString()}</div>
-                    <div style={{fontSize:11,color:"#8A87A0",marginTop:2}}>last 7 days total ({last7Count} of 7 logged)</div>
-                  </div>
-                </div>
-                <div style={{fontSize:11,color:"#B0ADBD",fontStyle:"italic"}}>Estimates only include days with a kcal figure — gaps aren't counted as zero.</div>
+                ))}
+                <div style={{fontSize:11,color:"#B0ADBD",fontStyle:"italic"}}>Estimates only include days with a figure for that nutrient — gaps aren't counted as zero.</div>
               </div>}
 
               <div style={card}>
                 <div style={lbl}>CSV includes</div>
-                {["Date",...painScalesDef.map(s=>s.name+" (1–10)"),"Symptoms","Condition severities & phases","Food notes","Meals + kcal","Notes","Flare data"].map(item=><div key={item} style={{fontSize:14,color:"#5A5870",padding:"6px 0",borderBottom:"1px solid #F4F2F7",display:"flex",gap:10}}><span style={{color:"#7AAF8E",fontWeight:700}}>✓</span> {item}</div>)}
+                {["Date",...painScalesDef.map(s=>s.name+" (1–10)"),"Symptoms","Condition severities & phases","Food notes","Meals + kcal, protein, fiber","Notes","Flare data"].map(item=><div key={item} style={{fontSize:14,color:"#5A5870",padding:"6px 0",borderBottom:"1px solid #F4F2F7",display:"flex",gap:10}}><span style={{color:"#7AAF8E",fontWeight:700}}>✓</span> {item}</div>)}
               </div>
               <button onClick={exportCSV} disabled={entries.length===0} style={{width:"100%",padding:14,border:"none",borderRadius:12,fontSize:15,fontWeight:600,background:entries.length===0?"#E2DFF0":headerBg,color:entries.length===0?"#B0ADBD":"white",cursor:entries.length===0?"not-allowed":"pointer"}}>
                 Download CSV
